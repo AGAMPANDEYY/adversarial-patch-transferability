@@ -1,7 +1,7 @@
 ### 0. Experiment
 experiment:
   name: "Experiments"
-  log_patch_address: "/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation/Experiments/"
+  log_patch_address: "/kaggle/working/adversarial-patch-transferability/Experiments/"
   device: "cuda"
 
 ### 1.Model
