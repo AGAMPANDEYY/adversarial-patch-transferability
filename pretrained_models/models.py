@@ -18,7 +18,7 @@ class Models():
   def get(self):
     if 'pidnet' in self.config.model.name:
       if '_s' in self.config.model.name:
-        model = torch.load('/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation/pretrained_models/PIDNet/PIDNet_S_Cityscapes_test.pt',map_location=self.device)
+        model = torch.load('/kaggle/input/pidnet_s_cityscapes_test/pytorch/default/1/PIDNet_S_Cityscapes_test.pt',map_location=self.device)
       if '_m' in self.config.model.name:
         model = torch.load('/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation/pretrained_models/PIDNet/PIDNet_M_Cityscapes_test.pt',map_location=self.device)
       if '_l' in self.config.model.name:
