@@ -1,5 +1,5 @@
 import sys
-sys.path.append("/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation")
+sys.path.append("/kaggle/working/adversarial-patch-transferability")
 from dataset.cityscapes import Cityscapes
 
 from pretrained_models.models import Models
