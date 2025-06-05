@@ -1,5 +1,7 @@
 import sys
 import torch
+# Save the original sys.path
+original_sys_path = sys.path.copy()
 sys.path.append("/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation")
 from pretrained_models.ICNet.icnet import ICNet
 from pretrained_models.BisNetV1.model import BiSeNetV1
@@ -7,6 +9,10 @@ from pretrained_models.BisNetV2.model import BiSeNetV2
 from pretrained_models.PIDNet.model import PIDNet, get_pred_model
 from transformers import SegformerFeatureExtractor, SegformerForSemanticSegmentation
 import torch.nn.functional as F
+
+
+# Restore original sys.path to avoid conflicts or shadowing
+sys.path = original_sys_path
 
 class Models():
   def __init__(self,config):
