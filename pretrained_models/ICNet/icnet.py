@@ -1,5 +1,5 @@
 import sys
-sys.path.append('/content/drive/MyDrive/Colab Notebooks/1_Papers/2_RobustRealtimeSS/2_CarlaGear/models/ICNet/')
+sys.path.append('/kaggle/working/adversarial-patch-transferability/pretrained_models/ICNet/')
 from backbone import SegBaseModel,SegBaseModel_resnet
 import torch.nn as nn
 import torch.nn.functional as F
