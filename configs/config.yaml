@@ -6,12 +6,12 @@ experiment:
 
 ### 1.Model
 model:
-  name: 'pidnet_l'
+  name: 'pidnet_s'
 
 ### 2. Data
 dataset:
   name: "cityscapes"
-  root: "/content/drive/MyDrive/Data/Self_driving/SemanticSeg/Cityscapes/"
+  root: "/kaggle/input/cityscapes-for-segmentation/Cityscapes/"
   train: "train.txt"
   test: "test.txt"
   val: "val.txt"
