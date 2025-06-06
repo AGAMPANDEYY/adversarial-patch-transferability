@@ -96,24 +96,50 @@ class Cityscapes(BaseDataset):
     def __getitem__(self, index):
         item = self.files[index]
         name = item["name"]
-        image = cv2.imread(os.path.join(self.root,item["img"]),
-                           cv2.IMREAD_COLOR)
-        size = image.shape
 
-        if 'test' in self.list_path:
+        # ─── IMAGE ─────────────────────────────────────────────────────────────────
+        # Take whatever is in item["img"], remove a leading "cityscapes/" if present,
+        # then join to self.root. That way we open exactly:
+        #   /kaggle/input/.../Cityscapes/train/images/aachen/…_leftImg8bit.png
+
+        rel_img = item["img"]
+        if rel_img.startswith("cityscapes/"):
+            rel_img = rel_img[len("cityscapes/") :]
+
+        image_path = os.path.join(self.root, rel_img)
+        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if image is None:
+            raise FileNotFoundError(f"Cannot read image at {image_path}")
+        size = image.shape   # (H, W, 3)
+
+        # ─── TEST PHASE ─────────────────────────────────────────────────────────────
+        if "test" in self.list_path:
             image = self.input_transform(image)
             image = image.transpose((2, 0, 1))
-
             return image.copy(), np.array(size), name
 
-        label = cv2.imread(os.path.join(self.root,item["label"]),
-                           cv2.IMREAD_GRAYSCALE)
+        # ─── LABEL (TRAIN/VAL) ───────────────────────────────────────────────────────
+        rel_lbl = item["label"]
+        if rel_lbl.startswith("cityscapes/"):
+            rel_lbl = rel_lbl[len("cityscapes/") :]
+
+        label_path = os.path.join(self.root, rel_lbl)
+        label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
+        if label is None:
+            raise FileNotFoundError(f"Cannot read label at {label_path}")
         label = self.convert_label(label)
 
-        image, label, edge = self.gen_sample(image, label, 
-                                self.multi_scale, self.flip, edge_size=self.bd_dilate_size)
+        # ─── GENERATE PATCHED SAMPLE ────────────────────────────────────────────────
+        image, label, edge = self.gen_sample(
+            image,
+            label,
+            self.multi_scale,
+            self.flip,
+            edge_size=self.bd_dilate_size,
+        )
 
         return image.copy(), label.copy(), edge.copy(), np.array(size), name
+
 
     
     def single_scale_inference(self, config, model, image):
