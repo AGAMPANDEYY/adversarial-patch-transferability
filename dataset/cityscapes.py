@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from PIL import Image
 import sys
-sys.path.append('/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation')
+sys.path.append('/kaggle/working/adversarial-patch-transferability/')
 
 import torch
 from dataset.base_dataset import BaseDataset
