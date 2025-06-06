@@ -1,7 +1,7 @@
 import sys
 # Save the original sys.path
 original_sys_path = sys.path.copy()
-sys.path.append("/kaggle/working/adversarial-patch-transferability")
+sys.path.append("/kaggle/working/adversarial-patch-transferability/")
 from dataset.cityscapes import Cityscapes
 
 from pretrained_models.models import Models
