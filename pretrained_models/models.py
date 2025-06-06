@@ -2,7 +2,7 @@ import sys
 import torch
 # Save the original sys.path
 original_sys_path = sys.path.copy()
-sys.path.append("/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation")
+sys.path.append("/kaggle/working/adversarial-patch-transferability/")
 from pretrained_models.ICNet.icnet import ICNet
 from pretrained_models.BisNetV1.model import BiSeNetV1
 from pretrained_models.BisNetV2.model import BiSeNetV2
