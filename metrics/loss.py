@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 
 class PatchLoss(nn.Module):
@@ -7,6 +8,39 @@ class PatchLoss(nn.Module):
         self.config = config
         self.device = config.experiment.device
         self.ignore_label = config.train.ignore_label
+
+    def compute_loss_transegpgd(self,ouput, patched_label, clean_output):
+
+        # 1) per-pixel CE over *patched* region
+        ce = F.cross_entropy(output, patched_label, reduction='none')   # [B,H,W]
+        patch_mask = (self.apply_patch(torch.zeros_like(image), 
+                      torch.zeros_like(patched_label), self.patch)[0] 
+                      > 0).float()  # [H,W], 1 inside patch region
+        ce_patch = ce * patch_mask  # zero-out non-patch pixels
+        
+        # Stage 1: hard-pixel focus
+        preds = output.argmax(dim=1)                                 # [B,H,W]
+        correct = (preds == patched_label).float() * patch_mask     # Ω_F
+        wrong   = (1 - correct) * patch_mask                        # Ω_T
+        γ = self.config.attack.gamma  # e.g. 0.7
+        L1 = ((1-γ)*(ce_patch * wrong).sum() 
+              + γ*(ce_patch * correct).sum()) / patch_mask.sum()
+        
+        # Stage 2: KL‑seed boosting
+        p_adv   = F.softmax(output, dim=1)
+        p_clean = F.softmax(clean_output, dim=1)
+        D_kl    = (p_adv * (p_adv.log() - p_clean.log())).sum(dim=1)  # [B,H,W]
+        mean_kl = D_kl.mean(dim=[1,2], keepdim=True)
+        high_kl = ((D_kl > mean_kl).float() * patch_mask)           # P_H
+        low_kl  = ((D_kl <= mean_kl).float() * patch_mask)          # P_L
+        β = self.config.attack.beta  # e.g. 0.2
+        L2 = ((1-β)*(ce_patch * high_kl).sum() 
+              + β*(ce_patch * low_kl).sum()) / patch_mask.sum()
+        
+        # Combine
+        η = self.config.attack.eta  # e.g. 0.5
+        loss = (1-η)*L1 + η*L2
+        return loss
 
 
     def compute_loss(self, model_output, label):
