@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+from patch.create import Patch
 
 class PatchLoss(nn.Module):
     def __init__(self, config):
@@ -8,8 +9,9 @@ class PatchLoss(nn.Module):
         self.config = config
         self.device = config.experiment.device
         self.ignore_label = config.train.ignore_label
+        self.apply_patch = Patch(config).apply_patch
 
-    def compute_loss_transegpgd(self,ouput, patched_label, clean_output):
+    def compute_loss_transegpgd(self,output, patched_label, clean_output):
 
         # 1) per-pixel CE over *patched* region
         ce = F.cross_entropy(output, patched_label, reduction='none')   # [B,H,W]
