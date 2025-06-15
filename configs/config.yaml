@@ -82,3 +82,9 @@ test:
   multi_scale: False
   flip_test: False
   
+### 7. attack
+
+attack: 
+  gamma: 0.7
+  beta: 0.2
+  eta: 0.5
