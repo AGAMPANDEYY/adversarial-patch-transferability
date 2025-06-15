@@ -118,6 +118,8 @@ class PatchTrainer():
 
   def train(self):
     epochs, iters_per_epoch, max_iters = self.epochs, self.iters_per_epoch, self.max_iters
+    start_epoch=0
+    switch_epoch=(start_epoch+self.end_epoch)//2
 
     start_time = time.time()
     self.logger.info('Start training, Total Epochs: {:d} = Iterations per epoch {:d}'.format(epochs, iters_per_epoch))
@@ -153,11 +155,22 @@ class PatchTrainer():
           with torch.no_grad():
              clean_output = self.model.predict(image, patched_label.shape)
 
-          # Compute adaptive loss
-          #loss = self.criterion.compute_loss(output, patched_label)
-          #loss = self.criterion.compute_loss_direct(output, patched_label)
-          loss= self.criterion.compute_loss_transegpgd(output, patched_label,clean_output)
-        
+          with torch.no_grad():
+              pred_labels = output.argmax(dim=1)  # (N, H, W)
+              correct_pixels = (pred_labels == patched_label) & (patched_label != self.config.train.ignore_label)
+              num_correct = correct_pixels.sum().item()
+          
+          if num_correct > 0:
+              self.logger.info(f"Batch {i_iter}: {num_correct} correctly predicted pixels remaining.")
+              loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
+          else:
+              loss = self.criterion.compute_loss_transegpgd_stage2(output, patched_label, clean_output)
+              # Compute adaptive loss
+              #loss = self.criterion.compute_loss(output, patched_label)
+              #loss = self.criterion.compute_loss_direct(output, patched_label)
+
+          #loss = self.criterion.compute_loss_transegpgd(output, patched_label, clean_output)
+
           total_loss += loss.item()
           #break
 
