@@ -11,6 +11,51 @@ class PatchLoss(nn.Module):
         self.ignore_label = config.train.ignore_label
         self.apply_patch = Patch(config).apply_patch
 
+    def compute_loss_transegpgd_stage1(self, pred, target, clean_pred):
+        """
+        Stage 1: emphasize hard-to-attack pixels (correctly predicted ones).
+        """
+        N, C, H, W = pred.shape
+        pred_softmax = F.softmax(pred, dim=1)
+        target_flat = target.view(-1)
+        pred_label = pred_softmax.argmax(dim=1)
+
+        # Flatten for per-pixel comparison
+        pred_label_flat = pred_label.view(-1)
+        correct_mask = (pred_label_flat == target_flat) & (target_flat != self.ignore_index)
+        incorrect_mask = (pred_label_flat != target_flat) & (target_flat != self.ignore_index)
+
+        loss = F.cross_entropy(pred, target, ignore_index=self.ignore_index, reduction='none').view(-1)
+
+        total_pixels = float(correct_mask.sum() + incorrect_mask.sum() + 1e-8)
+
+        loss_weighted = (1 - self.gamma) * loss[correct_mask].sum() + \
+                        self.gamma * loss[incorrect_mask].sum()
+
+        return loss_weighted / total_pixels
+
+    def compute_loss_transegpgd_stage2(self, pred, target, clean_pred):
+        """
+        Stage 2: emphasize high-transferability pixels (large KL divergence from clean prediction).
+        """
+        pred_softmax = F.softmax(pred, dim=1)
+        clean_softmax = F.softmax(clean_pred, dim=1)
+
+        kl_div = F.kl_div(pred_softmax.log(), clean_softmax, reduction='none').sum(1)  # (N, H, W)
+        kl_mean = kl_div[target != self.ignore_index].mean()
+
+        high_transfer_mask = (kl_div > kl_mean) & (target != self.ignore_index)
+        low_transfer_mask = (kl_div <= kl_mean) & (target != self.ignore_index)
+
+        loss = F.cross_entropy(pred, target, ignore_index=self.ignore_index, reduction='none')
+
+        total_pixels = float(high_transfer_mask.sum() + low_transfer_mask.sum() + 1e-8)
+
+        loss_weighted = (1 - self.beta) * loss[high_transfer_mask].sum() + \
+                        self.beta * loss[low_transfer_mask].sum()
+
+        return loss_weighted / total_pixels
+
     def compute_loss_transegpgd(self,output, patched_label, clean_output):
 
         # 1) per-pixel CE over *patched* region
