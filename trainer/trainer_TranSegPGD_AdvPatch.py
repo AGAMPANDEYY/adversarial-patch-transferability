@@ -166,7 +166,7 @@ class PatchTrainer():
           loss = self.criterion.compute_loss_adaptive(
                 output,
                 patched_label,
-                clean_pred=clean_out,
+                clean_pred=clean_output,
                 clean_image=image
             )
 
