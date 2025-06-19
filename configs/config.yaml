@@ -92,7 +92,7 @@ attack:
   beta_end:    0.5
   margin:      0.1
   lambda_ent:  0.1
-  use_margin:  True
+  use_margin:  False
 
   # new entries for schedulers & mixing
   stage1_epochs: 15        # how many epochs are “Stage 1”
