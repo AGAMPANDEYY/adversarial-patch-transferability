@@ -67,27 +67,43 @@ class PatchLoss(nn.Module):
         norm = (var - vmin) / (vmax - vmin + 1e-8)
         beta_map = norm.view(-1,1,1).expand_as(kl_map)
         return beta_map
-
-
+    
     def _make_margin_loss(self, pred, target):
         N, C, H, W = pred.shape
     
         if target.dtype != torch.long:
             target = target.to(dtype=torch.long)
-            
         if target.device != pred.device:
             print(f"[INFO] Moving target to {pred.device}")
             target = target.to(pred.device)
     
-        # Reshape for gather
-        true_logit = pred.gather(1, target.unsqueeze(1)).squeeze(1)
-        # Invalidate true class for max over wrong class
-        inf_mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), float('-inf'))
-        wrong_logit, _ = (pred + inf_mask).max(dim=1)
+        # Ignore invalid target values
+        mask = (target >= 0) & (target < C)
+    
+        pred = pred.permute(0, 2, 3, 1)  # [N,H,W,C]
+        target_flat = target.permute(0, 1).reshape(-1)
+        pred_flat = pred.reshape(-1, C)
+    
+        mask_flat = mask.reshape(-1)
+    
+        valid_pred = pred_flat[mask_flat]
+        valid_target = target_flat[mask_flat]
+    
+        # Margin loss components
+        true_logit = valid_pred.gather(1, valid_target.unsqueeze(1)).squeeze(1)
+    
+        inf_mask = torch.zeros_like(valid_pred).scatter_(1, valid_target.unsqueeze(1), float('-inf'))
+        wrong_logit, _ = (valid_pred + inf_mask).max(dim=1)
     
         margin_loss = F.relu(true_logit - wrong_logit + self.margin)
     
-        return margin_loss
+        # Pad to match original size if needed
+        final_loss = torch.zeros_like(target_flat, dtype=margin_loss.dtype, device=margin_loss.device)
+        final_loss[mask_flat] = margin_loss
+        final_loss = final_loss.view(N, H, W)
+    
+        return final_loss
+
 
 
 
