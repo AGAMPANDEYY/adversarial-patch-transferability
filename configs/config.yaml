@@ -84,7 +84,10 @@ test:
   
 ### 7. attack
 
-attack: 
-  gamma: 0.7
-  beta: 0.2
-  eta: 0.5
+attack:
+  gamma_start: 0.9
+  gamma_end: 0.5
+  beta_start: 0.1
+  beta_end: 0.5
+  margin: 0.1
+  lambda_ent: 0.1
