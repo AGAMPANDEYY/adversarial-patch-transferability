@@ -68,16 +68,22 @@ class PatchLoss(nn.Module):
         beta_map = norm.view(-1,1,1).expand_as(kl_map)
         return beta_map
 
-    def _make_margin_loss(self, pred, target):
+   def _make_margin_loss(self, pred, target):
         N, C, H, W = pred.shape
+        print(f"pred shape: {pred.shape}, target shape: {target.shape}, target dtype: {target.dtype}")
+    
+        assert target.dtype == torch.long, f"Target must be torch.long but got {target.dtype}"
+        assert target.shape == (N, H, W), f"Expected target shape [N,H,W], got {target.shape}"
+    
         logits = pred
-        target = target.long()
+        target = target.long()  # Ensure int64
         true_logit = logits.gather(1, target.unsqueeze(1)).squeeze(1)  # [N,H,W]
-        # mask out true class
+        
         inf_mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), float('-inf'))
-        wrong_logit, _ = (logits + inf_mask).max(dim=1)  # [N,H,W]
+        wrong_logit, _ = (logits + inf_mask).max(dim=1)
         margin_loss = F.relu(true_logit - wrong_logit + self.margin)
         return margin_loss
+
 
     def compute_loss_adaptive(self, pred, target, clean_pred=None, clean_image=None):
         N, C, H, W = pred.shape
