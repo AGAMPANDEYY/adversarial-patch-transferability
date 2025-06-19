@@ -70,15 +70,19 @@ class PatchLoss(nn.Module):
 
    def _make_margin_loss(self, pred, target):
         N, C, H, W = pred.shape
-        print(f"pred shape: {pred.shape}, target shape: {target.shape}, target dtype: {target.dtype}")
     
-        assert target.dtype == torch.long, f"Target must be torch.long but got {target.dtype}"
+        # Ensure shape: [N, H, W]
+        if target.ndim == 4 and target.shape[1] == 1:
+            target = target.squeeze(1)
+    
+        # Match dtype and device
+        target = target.to(dtype=torch.long, device=pred.device)
+    
         assert target.shape == (N, H, W), f"Expected target shape [N,H,W], got {target.shape}"
-    
-        logits = pred
-        target = target.long()  # Ensure int64
-        true_logit = logits.gather(1, target.unsqueeze(1)).squeeze(1)  # [N,H,W]
         
+        logits = pred
+        true_logit = logits.gather(1, target.unsqueeze(1)).squeeze(1)  # [N,H,W]
+    
         inf_mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), float('-inf'))
         wrong_logit, _ = (logits + inf_mask).max(dim=1)
         margin_loss = F.relu(true_logit - wrong_logit + self.margin)
