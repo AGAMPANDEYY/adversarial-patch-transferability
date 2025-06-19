@@ -1,5 +1,7 @@
 import sys
 import torch
+import os 
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 # Save the original sys.path
 original_sys_path = sys.path.copy()
 sys.path.append("/kaggle/working/adversarial-patch-transferability/")
