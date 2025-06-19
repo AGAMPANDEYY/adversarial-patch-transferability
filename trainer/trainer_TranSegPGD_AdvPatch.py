@@ -160,16 +160,15 @@ class PatchTrainer():
               correct_pixels = (pred_labels == patched_label) & (patched_label != self.config.train.ignore_label)
               num_correct = correct_pixels.sum().item()
           
-          if num_correct > 0:
-              self.logger.info(f"Batch {i_iter}: {num_correct} correctly predicted pixels remaining.")
-              loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
-          else:
-              loss = self.criterion.compute_loss_transegpgd_stage2(output, patched_label, clean_output)
-              # Compute adaptive loss
-              #loss = self.criterion.compute_loss(output, patched_label)
-              #loss = self.criterion.compute_loss_direct(output, patched_label)
 
-          #loss = self.criterion.compute_loss_transegpgd(output, patched_label, clean_output)
+          # 3) compute the unified per-pixel loss
+            #    note: we pass clean_out AND the clean image if you need feature-divergence
+          loss = self.criterion.compute_loss_adaptive(
+                output,
+                patched_label,
+                clean_pred=clean_out,
+                clean_image=image
+            )
 
           total_loss += loss.item()
           #break
