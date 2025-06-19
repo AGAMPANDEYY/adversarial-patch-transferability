@@ -3,91 +3,149 @@ import torch.nn.functional as F
 import torch.nn as nn
 from patch.create import Patch
 
+class LinearScheduler:
+    """
+    Simple linear scheduler for a value from start to end over total_epochs.
+    """
+    def __init__(self, start_value, end_value, total_epochs):
+        self.start = start_value
+        self.end = end_value
+        self.total = max(total_epochs, 1)
+
+    def get(self, epoch):
+        e = min(max(epoch, 0), self.total)
+        return self.start + (self.end - self.start) * (e / self.total)
+
 class PatchLoss(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, feature_extractor=None):
         super(PatchLoss, self).__init__()
         self.config = config
         self.device = config.experiment.device
         self.ignore_label = config.train.ignore_label
-        self.apply_patch = Patch(config).apply_patch
+        self.feature_extractor = feature_extractor
 
-    def compute_loss_transegpgd_stage1(self, pred, target, clean_pred):
-        """
-        Stage 1: emphasize hard-to-attack pixels (correctly predicted ones).
-        """
+        # schedulers
+        E1 = config.attack.stage1_epochs
+        E2 = config.attack.stage2_epochs
+        self.gamma_sched = LinearScheduler(config.attack.gamma_start,
+                                          config.attack.gamma_end, E1)
+        self.beta_sched  = LinearScheduler(config.attack.beta_start,
+                                          config.attack.beta_end,  E2)
+        self.current_epoch = 0
+        self.register_buffer('ema_kl', torch.zeros(1))
+
+        # hyper-params
+        self.margin = getattr(config.attack, 'margin', 0.1)
+        self.lambda_ent = getattr(config.attack, 'lambda_ent', 0.1)
+        self.eta = getattr(config.attack, 'eta', 0.5)
+        self.use_feat_div = getattr(config.attack, 'use_feat_div', False)
+
+    def step_epoch(self):
+        self.current_epoch += 1
+
+    @property
+    def gamma(self):
+        return self.gamma_sched.get(self.current_epoch)
+
+    @property
+    def beta(self):
+        e2 = max(self.current_epoch - self.config.attack.stage1_epochs, 0)
+        return self.beta_sched.get(e2)
+
+    def _make_beta_map(self, kl_map, target):
+        mask = (target != self.ignore_label)
+        # EMA update
+        ema_new = 0.9 * self.ema_kl + 0.1 * kl_map.detach().mean()
+        self.ema_kl = ema_new
+
+        # per-sample var
+        var = ((kl_map - ema_new)**2 * mask).sum(dim=[1,2])
+        var /= (mask.sum(dim=[1,2]) + 1e-8)
+
+        # normalize
+        vmin, vmax = var.min(), var.max()
+        norm = (var - vmin) / (vmax - vmin + 1e-8)
+        beta_map = norm.view(-1,1,1).expand_as(kl_map)
+        return beta_map
+
+    def _make_margin_loss(self, pred, target):
         N, C, H, W = pred.shape
-        pred_softmax = F.softmax(pred, dim=1)
-        target_flat = target.view(-1)
-        pred_label = pred_softmax.argmax(dim=1)
+        logits = pred
+        true_logit = logits.gather(1, target.unsqueeze(1)).squeeze(1)  # [N,H,W]
+        # mask out true class
+        inf_mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), float('-inf'))
+        wrong_logit, _ = (logits + inf_mask).max(dim=1)  # [N,H,W]
+        margin_loss = F.relu(true_logit - wrong_logit + self.margin)
+        return margin_loss
 
-        # Flatten for per-pixel comparison
-        pred_label_flat = pred_label.view(-1)
-        correct_mask = (pred_label_flat == target_flat) & (target_flat != self.ignore_index)
-        incorrect_mask = (pred_label_flat != target_flat) & (target_flat != self.ignore_index)
+    def compute_loss_adaptive(self, pred, target, clean_pred=None, clean_image=None):
+        N, C, H, W = pred.shape
+        ignore = (target == self.ignore_label)
 
-        loss = F.cross_entropy(pred, target, ignore_index=self.ignore_index, reduction='none').view(-1)
+        # masks
+        pred_labels = pred.argmax(dim=1)
+        correct = (pred_labels == target) & ~ignore
+        broken  = (pred_labels != target) & ~ignore
 
-        total_pixels = float(correct_mask.sum() + incorrect_mask.sum() + 1e-8)
+        # choose per-pixel loss: margin or CE
+        if self.config.attack.use_margin:
+            base_loss = self._make_margin_loss(pred, target)
+        else:
+            base_loss = F.cross_entropy(pred, target,
+                                        ignore_index=self.ignore_label,
+                                        reduction='none')
 
-        loss_weighted = (1 - self.gamma) * loss[correct_mask].sum() + \
-                        self.gamma * loss[incorrect_mask].sum()
+        # Stage 1 term
+        γ = self.gamma
+        L1 = ((1 - γ) * base_loss * correct).sum()
 
-        return loss_weighted / total_pixels
+        # Stage 2 term
+        # KL map
+        pred_log   = F.log_softmax(pred, dim=1)
+        clean_soft = F.softmax(clean_pred, dim=1)
+        kl_map = F.kl_div(pred_log, clean_soft, reduction='none').sum(1)
+        # beta map
+        β_map = self._make_beta_map(kl_map, target)
+        # high/low masks
+        thresh = kl_map[~ignore].mean()
+        high = (kl_map > thresh) & ~ignore
+        low  = (kl_map <= thresh) & ~ignore
 
-    def compute_loss_transegpgd_stage2(self, pred, target, clean_pred):
-        """
-        Stage 2: emphasize high-transferability pixels (large KL divergence from clean prediction).
-        """
-        pred_softmax = F.softmax(pred, dim=1)
-        clean_softmax = F.softmax(clean_pred, dim=1)
+        # CE variant of Stage2
+        L2_ce = ((1 - β_map) * base_loss * high + β_map * base_loss * low).sum()
 
-        kl_div = F.kl_div(pred_softmax.log(), clean_softmax, reduction='none').sum(1)  # (N, H, W)
-        kl_mean = kl_div[target != self.ignore_index].mean()
+        # optional feature-divergence
+        if self.use_feat_div and self.feature_extractor is not None and clean_image is not None:
+            F_adv   = self.feature_extractor(pred)
+            F_clean = self.feature_extractor(clean_image)
+            # cosine dist
+            num = (F_adv * F_clean).sum(dim=1)
+            den = F_adv.norm(dim=1) * F_clean.norm(dim=1) + 1e-8
+            feat_div = 1 - num/den  # [N,h',w']
+            up = F.interpolate(feat_div.unsqueeze(1), (H,W), mode='bilinear').squeeze(1)
+            mask = ~ignore
+            mth = up[mask].mean()
+            high_f = mask & (up > mth)
+            low_f  = mask & (up <= mth)
+            L2_feat = ((1 - self.beta) * base_loss * high_f +
+                       self.beta * base_loss * low_f).sum()
+        else:
+            L2_feat = 0.0
 
-        high_transfer_mask = (kl_div > kl_mean) & (target != self.ignore_index)
-        low_transfer_mask = (kl_div <= kl_mean) & (target != self.ignore_index)
+        # entropy regularization
+        p_adv = F.softmax(pred, dim=1)
+        ent = -(p_adv * p_adv.log()).sum(dim=1)
+        ent_loss = (ent * (~ignore)).sum() / ((~ignore).sum() + 1e-8)
 
-        loss = F.cross_entropy(pred, target, ignore_index=self.ignore_index, reduction='none')
+        # combine Stage2
+        L2 = L2_ce + (L2_feat if L2_feat else 0)
 
-        total_pixels = float(high_transfer_mask.sum() + low_transfer_mask.sum() + 1e-8)
+        # final mix
+        eta = self.eta
+        L = (1 - eta) * L1 + eta * L2 + self.lambda_ent * ent_loss
 
-        loss_weighted = (1 - self.beta) * loss[high_transfer_mask].sum() + \
-                        self.beta * loss[low_transfer_mask].sum()
-
-        return loss_weighted / total_pixels
-
-    def compute_loss_transegpgd(self,output, patched_label, clean_output):
-
-        # 1) per-pixel CE over *patched* region
-        ce = F.cross_entropy(output, patched_label, reduction='none')   # [B,H,W]
-        patch_mask = (self.apply_patch(torch.zeros_like(image), 
-                      torch.zeros_like(patched_label), self.patch)[0] 
-                      > 0).float()  # [H,W], 1 inside patch region
-        ce_patch = ce * patch_mask  # zero-out non-patch pixels
-        
-        # Stage 1: hard-pixel focus
-        preds = output.argmax(dim=1)                                 # [B,H,W]
-        correct = (preds == patched_label).float() * patch_mask     # Ω_F
-        wrong   = (1 - correct) * patch_mask                        # Ω_T
-        γ = self.config.attack.gamma  # e.g. 0.7
-        L1 = ((1-γ)*(ce_patch * wrong).sum() 
-              + γ*(ce_patch * correct).sum()) / patch_mask.sum()
-        
-        # Stage 2: KL‑seed boosting
-        p_adv   = F.softmax(output, dim=1)
-        p_clean = F.softmax(clean_output, dim=1)
-        D_kl    = (p_adv * (p_adv.log() - p_clean.log())).sum(dim=1)  # [B,H,W]
-        mean_kl = D_kl.mean(dim=[1,2], keepdim=True)
-        high_kl = ((D_kl > mean_kl).float() * patch_mask)           # P_H
-        low_kl  = ((D_kl <= mean_kl).float() * patch_mask)          # P_L
-        β = self.config.attack.beta  # e.g. 0.2
-        L2 = ((1-β)*(ce_patch * high_kl).sum() 
-              + β*(ce_patch * low_kl).sum()) / patch_mask.sum()
-        
-        # Combine
-        η = self.config.attack.eta  # e.g. 0.5
-        loss = (1-η)*L1 + η*L2
-        return loss
+        total = float((~ignore).sum().item() + 1e-8)
+        return L / total
 
 
     def compute_loss(self, model_output, label):
