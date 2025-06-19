@@ -72,16 +72,9 @@ class PatchLoss(nn.Module):
     def _make_margin_loss(self, pred, target):
         N, C, H, W = pred.shape
     
-        # 🔍 DEBUG
-        print(f"[DEBUG] pred shape: {pred.shape}, dtype: {pred.dtype}, device: {pred.device}")
-        print(f"[DEBUG] target shape: {target.shape}, dtype: {target.dtype}, device: {target.device}")
-    
-        # ✅ Ensure correct dtype
         if target.dtype != torch.long:
-            print("[INFO] Casting target to torch.long")
             target = target.to(dtype=torch.long)
-    
-        # ✅ Ensure correct device
+            
         if target.device != pred.device:
             print(f"[INFO] Moving target to {pred.device}")
             target = target.to(pred.device)
@@ -90,7 +83,7 @@ class PatchLoss(nn.Module):
         true_logit = pred.gather(1, target.unsqueeze(1)).squeeze(1)
         # Invalidate true class for max over wrong class
         inf_mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), float('-inf'))
-        wrong_logit, _ = (logits + inf_mask).max(dim=1)
+        wrong_logit, _ = (pred + inf_mask).max(dim=1)
     
         margin_loss = F.relu(true_logit - wrong_logit + self.margin)
     
