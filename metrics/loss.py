@@ -71,6 +71,7 @@ class PatchLoss(nn.Module):
     def _make_margin_loss(self, pred, target):
         N, C, H, W = pred.shape
         logits = pred
+        target = target.long()
         true_logit = logits.gather(1, target.unsqueeze(1)).squeeze(1)  # [N,H,W]
         # mask out true class
         inf_mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), float('-inf'))
