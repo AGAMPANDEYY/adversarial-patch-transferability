@@ -69,25 +69,36 @@ class PatchLoss(nn.Module):
         return beta_map
 
 
-    def _make_margin_loss(self, pred, target):
+   def _make_margin_loss(self, pred, target):
         N, C, H, W = pred.shape
     
-        # Ensure correct shape
+        # ✅ Print full diagnostic
+        print(f"[DEBUG] pred shape: {pred.shape}, dtype: {pred.dtype}, device: {pred.device}")
+        print(f"[DEBUG] target shape before squeeze: {target.shape}, dtype: {target.dtype}, device: {target.device}")
+    
+        # ✅ Squeeze if necessary
         if target.ndim == 4 and target.shape[1] == 1:
             target = target.squeeze(1)
-    
-        # Ensure dtype and device match
+        
+        # ✅ Force correct dtype and device
         target = target.to(dtype=torch.long, device=pred.device)
     
-        assert target.shape == (N, H, W), f"Expected target shape [N,H,W], got {target.shape}"
-        
-        logits = pred  # [N,C,H,W]
-        true_logit = logits.gather(1, target.unsqueeze(1)).squeeze(1)  # [N,H,W]
+        print(f"[DEBUG] target shape after squeeze: {target.shape}, dtype: {target.dtype}, device: {target.device}")
     
+        assert target.dtype == torch.long, f"[ERROR] Target must be torch.long but got {target.dtype}"
+        assert target.shape == (N, H, W), f"[ERROR] Expected target shape [N,H,W], got {target.shape}"
+    
+        logits = pred  # [N, C, H, W]
+        true_logit = logits.gather(1, target.unsqueeze(1)).squeeze(1)  # [N, H, W]
+    
+        # Invalidate true class for max over wrong class
         inf_mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), float('-inf'))
         wrong_logit, _ = (logits + inf_mask).max(dim=1)
+    
         margin_loss = F.relu(true_logit - wrong_logit + self.margin)
+    
         return margin_loss
+
 
 
     def compute_loss_adaptive(self, pred, target, clean_pred=None, clean_image=None):
