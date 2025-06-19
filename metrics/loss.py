@@ -69,7 +69,7 @@ class PatchLoss(nn.Module):
         return beta_map
 
 
-   def _make_margin_loss(self, pred, target):
+    def _make_margin_loss(self, pred, target):
         N, C, H, W = pred.shape
     
         # 🔍 DEBUG
