@@ -68,19 +68,20 @@ class PatchLoss(nn.Module):
         beta_map = norm.view(-1,1,1).expand_as(kl_map)
         return beta_map
 
-   def _make_margin_loss(self, pred, target):
+
+    def _make_margin_loss(self, pred, target):
         N, C, H, W = pred.shape
     
-        # Ensure shape: [N, H, W]
+        # Ensure correct shape
         if target.ndim == 4 and target.shape[1] == 1:
             target = target.squeeze(1)
     
-        # Match dtype and device
+        # Ensure dtype and device match
         target = target.to(dtype=torch.long, device=pred.device)
     
         assert target.shape == (N, H, W), f"Expected target shape [N,H,W], got {target.shape}"
         
-        logits = pred
+        logits = pred  # [N,C,H,W]
         true_logit = logits.gather(1, target.unsqueeze(1)).squeeze(1)  # [N,H,W]
     
         inf_mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), float('-inf'))
