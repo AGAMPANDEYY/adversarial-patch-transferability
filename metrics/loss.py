@@ -32,7 +32,7 @@ class PatchLoss(nn.Module):
         self.beta_sched  = LinearScheduler(config.attack.beta_start,
                                           config.attack.beta_end,  E2)
         self.current_epoch = 0
-        self.register_buffer('ema_kl', torch.zeros(1))
+        self.register_buffer('ema_kl', torch.zeros(1, device=self.device))
 
         # hyper-params
         self.margin = getattr(config.attack, 'margin', 0.1)
@@ -54,17 +54,18 @@ class PatchLoss(nn.Module):
 
     def _make_beta_map(self, kl_map, target):
         mask = (target != self.ignore_label)
-        # EMA update
-        ema_new = 0.9 * self.ema_kl + 0.1 * kl_map.detach().mean()
-        self.ema_kl = ema_new
-
-        # per-sample var
-        var = ((kl_map - ema_new)**2 * mask).sum(dim=[1,2])
-        var /= (mask.sum(dim=[1,2]) + 1e-8)
-
-        # normalize
+       # compute the mean KL on the same device as the buffer
+        kl_mean = kl_map.detach().mean()
+    
+        # in‑place EMA update on the buffer
+        self.ema_kl.mul_(0.9).add_(0.1 * kl_mean)
+    
+        # per-sample variance, normalization, etc.
+        var = ((kl_map - self.ema_kl)**2 * mask).sum(dim=[1,2]) \
+                / (mask.sum(dim=[1,2]) + 1e-8)
         vmin, vmax = var.min(), var.max()
         norm = (var - vmin) / (vmax - vmin + 1e-8)
+    
         beta_map = norm.view(-1,1,1).expand_as(kl_map)
         return beta_map
     
