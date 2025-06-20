@@ -117,10 +117,10 @@ class PatchLoss(nn.Module):
         broken  = (pred_labels != target) & ~ignore
 
         # choose per-pixel loss: margin or CE
-        if self.config.attack.use_margin:
-            base_loss = self._make_margin_loss(pred, target)
-        else:
-            base_loss = F.cross_entropy(pred, target,
+        #if self.config.attack.use_margin:
+            #base_loss = self._make_margin_loss(pred, target)
+        #else:
+        base_loss = F.cross_entropy(pred, target,
                                         ignore_index=self.ignore_label,
                                         reduction='none')
 
