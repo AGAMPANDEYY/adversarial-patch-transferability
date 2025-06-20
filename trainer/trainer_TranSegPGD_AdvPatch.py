@@ -140,6 +140,7 @@ class PatchTrainer():
           
           # Randomly place patch in image and label(put ignore index)
           patched_image, patched_label = self.apply_patch(image,true_label,self.patch)
+          patched_label = patched_label.long()
           # fig = plt.figure()
           # ax = fig.add_subplot(1,2,1)
           # ax.imshow(patched_image[0].permute(1,2,0).cpu().detach().numpy())
