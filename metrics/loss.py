@@ -111,6 +111,7 @@ class PatchLoss(nn.Module):
         # ensure target is the correct dtype for cross_entropy
         if target.dtype != torch.long:
             target = target.long()
+        assert target.dtype == torch.long, f"target is still {target.dtype}"
         N, C, H, W = pred.shape
         ignore = (target == self.ignore_label)
 
