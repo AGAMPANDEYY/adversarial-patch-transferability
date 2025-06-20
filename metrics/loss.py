@@ -108,6 +108,9 @@ class PatchLoss(nn.Module):
 
 
     def compute_loss_adaptive(self, pred, target, clean_pred=None, clean_image=None):
+        # ensure target is the correct dtype for cross_entropy
+        if target.dtype != torch.long:
+            target = target.long()
         N, C, H, W = pred.shape
         ignore = (target == self.ignore_label)
 
