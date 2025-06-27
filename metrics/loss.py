@@ -10,6 +10,7 @@ class PatchLoss(nn.Module):
         self.device = config.experiment.device
         self.ignore_label = config.train.ignore_label
         self.apply_patch = Patch(config).apply_patch
+        self.ignore_index= config.train.ignore_label
 
     def compute_loss_transegpgd_stage1(self, pred, target, clean_pred):
         """
