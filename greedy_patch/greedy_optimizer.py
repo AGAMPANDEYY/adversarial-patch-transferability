@@ -75,7 +75,7 @@ class GreedyPatchOptimizer:
         
   
 
-   def load_patch(self, patch_path=None):
+    def load_patch(self, patch_path=None):
             """
             Load an existing patch or create a new random one if path is None.
         
