@@ -86,7 +86,7 @@ class GreedyPatchOptimizer:
             # First try the exact path
             if os.path.exists(patch_path):
                 self.logger.info(f"Loading patch from {patch_path}")
-                patch = torch.load(patch_path, map_location=self.device)
+                patch = torch.load(patch_path, map_location=self.device, weights_only=False)
                 return patch
             
             # If exact path doesn't exist, try with different extensions
@@ -95,7 +95,7 @@ class GreedyPatchOptimizer:
                 try_path = base_path + try_ext
                 if os.path.exists(try_path):
                     self.logger.info(f"Loading patch from {try_path}")
-                    patch = torch.load(try_path, map_location=self.device)
+                    patch = torch.load(try_path, map_location=self.device, weights_only=False)
                     return patch
             # If no file with either extension exists, create a new patch
             self.logger.info(f"Could not find patch at {patch_path} with either .pt or .p extension")
