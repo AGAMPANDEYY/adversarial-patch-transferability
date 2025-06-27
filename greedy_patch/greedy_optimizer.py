@@ -1,4 +1,5 @@
 import sys
+import pickle
 # Save the original sys.path
 original_sys_path = sys.path.copy()
 sys.path.append("/kaggle/working/adversarial-patch-transferability/")
@@ -72,41 +73,52 @@ class GreedyPatchOptimizer:
         # Patch adjustment parameters
         self.delta = 2/255  # The adjustment step size (+2/255, 0, -2/255)
         
-    def load_patch(self, patch_path=None):
-        """
-        Load an existing patch or create a new random one if path is None.
+  
+
+   def load_patch(self, patch_path=None):
+            """
+            Load an existing patch or create a new random one if path is None.
         
-        Args:
-            patch_path: Path to the existing patch file
-            
-        Returns:
-            The loaded or newly created patch
-        """
-        if patch_path:
-            # First try the exact path
-            if os.path.exists(patch_path):
-                self.logger.info(f"Loading patch from {patch_path}")
-                patch = torch.load(patch_path, map_location=self.device, weights_only=False)
-                return patch
-            
-            # If exact path doesn't exist, try with different extensions
-            base_path, ext = os.path.splitext(patch_path)
-            for try_ext in ['.pt', '.p']:
-                try_path = base_path + try_ext
-                if os.path.exists(try_path):
-                    self.logger.info(f"Loading patch from {try_path}")
-                    patch = torch.load(try_path, map_location=self.device, weights_only=False)
-                    return patch
-            # If no file with either extension exists, create a new patch
-            self.logger.info(f"Could not find patch at {patch_path} with either .pt or .p extension")
-            self.logger.info("Creating new random patch")
-        else:
-            self.logger.info("No patch path provided. Creating new random patch")
-            
-        # Create a new random patch if we reach here
-        patch = torch.rand((3, self.patch_size, self.patch_size), device=self.device)
-        return patch
-    
+            Args:
+                patch_path: Path to the existing patch file
+        
+            Returns:
+                The loaded or newly created patch
+            """
+            if patch_path:
+                # First try the exact path
+                if os.path.exists(patch_path):
+                    self.logger.info(f"Loading patch from {patch_path}")
+                    try:
+                        # Try torch.load
+                        patch = torch.load(patch_path, map_location=self.device, weights_only=False)
+                    except Exception as e:
+                        self.logger.warning(f"torch.load failed: {e}, trying pickle.load...")
+                        patch = pickle.load(open(patch_path, "rb"))[0]  # Your patches are pickled lists
+                    return patch.to(self.device)
+        
+                # Try alternate extensions
+                base_path, ext = os.path.splitext(patch_path)
+                for try_ext in ['.pt', '.p']:
+                    try_path = base_path + try_ext
+                    if os.path.exists(try_path):
+                        self.logger.info(f"Loading patch from {try_path}")
+                        try:
+                            patch = torch.load(try_path, map_location=self.device, weights_only=False)
+                        except Exception as e:
+                            self.logger.warning(f"torch.load failed: {e}, trying pickle.load...")
+                            patch = pickle.load(open(try_path, "rb"))[0]
+                        return patch.to(self.device)
+        
+                self.logger.info(f"Could not find patch at {patch_path} with .pt or .p")
+                self.logger.info("Creating new random patch")
+            else:
+                self.logger.info("No patch path provided. Creating new random patch")
+        
+            # Create a new random patch if no file found or no path provided
+            patch = torch.rand((3, self.patch_size, self.patch_size), device=self.device)
+            return patch
+
     def compute_priority_map(self, image, patch, true_label):
         """
         Compute a pixel-level priority map based on gradient values.
