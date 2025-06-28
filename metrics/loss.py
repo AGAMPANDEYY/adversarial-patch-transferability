@@ -11,7 +11,7 @@ class PatchLoss(nn.Module):
         self.ignore_label = config.train.ignore_label
         self.apply_patch = Patch(config).apply_patch
         self.ignore_index= config.train.ignore_label
-        self.feature_extractor = feature_extractor
+        #self.feature_extractor = feature_extractor
         self.gamma=0.7
 
         # schedulers
