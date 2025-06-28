@@ -91,3 +91,16 @@ attack:
   beta_end: 0.5
   margin: 0.1
   lambda_ent: 0.1
+  
+  use_margin:  False
+
+  # new entries for schedulers & mixing
+  stage1_epochs: 15        # how many epochs are “Stage 1”
+  stage2_epochs: 15        # how many epochs are “Stage 2” (so total=end_epoch)
+  eta:            0.5      # weight for mixing L1 vs L2 (per-pixel blend)
+
+  # feature-space divergence
+  use_feat_div:  False     # set True to turn on feature-divergence term
+
+  # (optional) EOT curriculum flag
+  use_hard_eot:  True      # if True, you can detect epoch ≥ stage1_epochs and switch to stronger EOT
