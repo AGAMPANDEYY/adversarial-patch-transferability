@@ -11,6 +11,7 @@ from pretrained_models.PIDNet.model import PIDNet, get_pred_model
 from metrics.performance import SegmentationMetric
 from metrics.loss import PatchLoss
 from patch.create import Patch
+from gnn.priority_gcn import PriorityGCN  
 
 import time
 import torch
@@ -72,6 +73,28 @@ class GreedyPatchOptimizer:
         
         # Patch adjustment parameters
         self.delta = 2/255  # The adjustment step size (+2/255, 0, -2/255)
+
+        #GCN Priority Map
+
+        # BUILD EDGES FOR GNN
+
+        # --- build a 4‑neighbor grid once for P×P patch ---
+        P = self.patch_size
+        edges = []
+        for i in range(P):
+            for j in range(P):
+                idx = i * P + j
+                for di, dj in [(1,0),(-1,0),(0,1),(0,-1)]:
+                    ni, nj = i + di, j + dj
+                    if 0 <= ni < P and 0 <= nj < P:
+                        edges.append([idx, ni * P + nj])
+        # edge_index shape [2, E]
+        self.grid_edge_index = torch.tensor(edges, dtype=torch.long).t()
+
+        self.gnn = PriorityGCN(
+                    in_channels=8,      # e.g. 3 RGB + 3 grad + 1 saliency + 1 history = 8
+                    hidden_channels=64
+                ).to(self.device)
         
   
 
@@ -121,52 +144,42 @@ class GreedyPatchOptimizer:
 
     def compute_priority_map(self, image, patch, true_label):
         """
-        Compute a pixel-level priority map based on gradient values.
-        
-        Args:
-            image: The input image
-            patch: The current patch
-            true_label: The ground truth label
-            
-        Returns:
-            A priority map with values for each pixel in the patch
+        Compute a pixel-level priority map using a GNN.
         """
-        # Create a copy of the patch that requires gradients
-        patch_with_grad = patch.clone().detach().requires_grad_(True)
-        
-        # Apply the patch to the image
-        patched_image, patched_label = self.apply_patch(image, true_label, patch_with_grad)
-        
-        # Ensure label is the correct dtype for loss computation
-        patched_label = patched_label.long()
+        P = self.patch_size
 
-        # Forward pass
-        output = self.model.predict(patched_image, patched_label.shape)
-        
-        # Compute loss
+        # 1) Forward+backward to get gradient features
+        patch_w = patch.clone().detach().requires_grad_(True)
+        img_p, lbl_p = self.apply_patch(image, true_label, patch_w)
+        lbl_p = lbl_p.long()
+        out = self.model.predict(img_p, lbl_p.shape)
         with torch.no_grad():
-            clean_output = self.model.predict(image, patched_label.shape)
-            
-        # Compute loss (using the same loss as in the reference implementation)
-        pred_labels = output.argmax(dim=1)
-        correct_pixels = (pred_labels == patched_label) & (patched_label != self.config.train.ignore_label)
-        num_correct = correct_pixels.sum().item()
-        
-        if num_correct > 0:
-            loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
+            out_clean = self.model.predict(image, lbl_p.shape)
+
+        preds = out.argmax(dim=1)
+        correct = (preds == lbl_p) & (lbl_p != self.config.train.ignore_label)
+        if correct.sum().item() > 0:
+            loss = self.criterion.compute_loss_transegpgd_stage1(out, lbl_p, out_clean)
         else:
-            loss = self.criterion.compute_loss_transegpgd_stage2(output, patched_label, clean_output)
-        
-        # Compute gradients
+            loss = self.criterion.compute_loss_transegpgd_stage2(out, lbl_p, out_clean)
+
         loss.backward()
-        
-        # Get the gradients
-        patch_grad = patch_with_grad.grad
-        
-        # Compute priority based on sum of absolute gradient values across channels
-        priority_map = torch.sum(torch.abs(patch_grad), dim=0)
-        
+        grad = patch_w.grad  # [3, P, P]
+
+        # 2) Build node features: [P*P, 8]
+        rgb       = patch.view(3, -1).T                   # [P*P,3]
+        grad_f    = grad.view(3, -1).T                    # [P*P,3]
+        saliency  = grad_f.abs().sum(dim=1, keepdim=True) # [P*P,1]
+        history   = (patch.view(3, -1).abs().sum(dim=1)>0).float().unsqueeze(1)  # [P*P,1]
+        x_feat    = torch.cat([rgb, grad_f, saliency, history], dim=1).to(self.device)
+
+        # 3) Run GNN on the precomputed pixel graph
+        scores = self.gnn(x_feat, self.grid_edge_index.to(self.device))  # [P*P]
+
+        # 4) Reshape back into [P, P] priority map
+        priority_map = scores.view(P, P)
         return priority_map
+
     
     def evaluate_patch(self, image, patch, true_label):
         """
