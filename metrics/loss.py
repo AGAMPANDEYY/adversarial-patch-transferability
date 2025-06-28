@@ -11,6 +11,23 @@ class PatchLoss(nn.Module):
         self.ignore_label = config.train.ignore_label
         self.apply_patch = Patch(config).apply_patch
         self.ignore_index= config.train.ignore_label
+        self.feature_extractor = feature_extractor
+
+        # schedulers
+        E1 = config.attack.stage1_epochs
+        E2 = config.attack.stage2_epochs
+        self.gamma_sched = LinearScheduler(config.attack.gamma_start,
+                                          config.attack.gamma_end, E1)
+        self.beta_sched  = LinearScheduler(config.attack.beta_start,
+                                          config.attack.beta_end,  E2)
+        self.current_epoch = 0
+        self.register_buffer('ema_kl', torch.zeros(1, device=self.device))
+
+        # hyper-params
+        self.margin = getattr(config.attack, 'margin', 0.1)
+        self.lambda_ent = getattr(config.attack, 'lambda_ent', 0.1)
+        self.eta = getattr(config.attack, 'eta', 0.5)
+        self.use_feat_div = getattr(config.attack, 'use_feat_div', False)
 
     def compute_loss_transegpgd_stage1(self, pred, target, clean_pred):
         """
