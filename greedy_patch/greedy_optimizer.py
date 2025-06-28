@@ -137,6 +137,9 @@ class GreedyPatchOptimizer:
         # Apply the patch to the image
         patched_image, patched_label = self.apply_patch(image, true_label, patch_with_grad)
         
+        # Ensure label is the correct dtype for loss computation
+        patched_label = patched_label.long()
+
         # Forward pass
         output = self.model.predict(patched_image, patched_label.shape)
         
