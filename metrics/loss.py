@@ -3,6 +3,20 @@ import torch.nn.functional as F
 import torch.nn as nn
 from patch.create import Patch
 
+
+class LinearScheduler:
+    """
+    Simple linear scheduler for a value from start to end over total_epochs.
+    """
+    def __init__(self, start_value, end_value, total_epochs):
+        self.start = start_value
+        self.end = end_value
+        self.total = max(total_epochs, 1)
+
+    def get(self, epoch):
+        e = min(max(epoch, 0), self.total)
+        return self.start + (self.end - self.start) * (e / self.total)
+
 class PatchLoss(nn.Module):
     def __init__(self, config):
         super(PatchLoss, self).__init__()
