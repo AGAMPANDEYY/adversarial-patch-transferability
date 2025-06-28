@@ -12,6 +12,7 @@ class PatchLoss(nn.Module):
         self.apply_patch = Patch(config).apply_patch
         self.ignore_index= config.train.ignore_label
         self.feature_extractor = feature_extractor
+        self.gamma=0.7
 
         # schedulers
         E1 = config.attack.stage1_epochs
