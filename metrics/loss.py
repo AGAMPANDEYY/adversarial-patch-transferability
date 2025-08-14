@@ -18,7 +18,7 @@ class LinearScheduler:
         return self.start + (self.end - self.start) * (e / self.total)
 
 class PatchLoss(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, main_logger):
         super(PatchLoss, self).__init__()
         self.config = config
         self.device = config.experiment.device
@@ -47,6 +47,8 @@ class PatchLoss(nn.Module):
         self.lambda_ent = getattr(config.attack, 'lambda_ent', 0.1)
         self.eta = getattr(config.attack, 'eta', 0.5)
         self.use_feat_div = getattr(config.attack, 'use_feat_div', False)
+
+        self.logger = main_logger
 
     def set_epoch(self, epoch: int):
         """Update stage weights each epoch."""
@@ -128,7 +130,7 @@ class PatchLoss(nn.Module):
         """
         Stage 2 (JS): emphasize high-transferability pixels measured by per-pixel JS(pred, clean).
         """
-        print("JS Divergence Stage 2 loss")
+        self.logger.info('-------------JS Divergence Stage 2 loss--------------------------------')
         pred = pred.float()
         target = target.long()
     
