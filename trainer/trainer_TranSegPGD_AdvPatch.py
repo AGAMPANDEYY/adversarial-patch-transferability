@@ -96,6 +96,21 @@ class PatchTrainer():
       self.patch = torch.rand((3, self.patch_size, self.patch_size), 
                               requires_grad=True, 
                               device=self.device)
+
+      # ===== NEW: tanh-parameterized patch with low-frequency init =====
+      self.patch_param = self.init_lowfreq_tanh((3, self.S, self.S), cutoff=0.2)
+
+      # (optional) choose another init by swapping the line above with:
+      # self.patch_param = self.init_perlin_tanh((3, self.S, self.S))
+      # self.patch_param = self.init_dataset_color_tanh((3, self.S, self.S), mean=(0.286,0.325,0.283))
+
+      # Optimizer (Adam is typically more stable than per-step FGSM)
+      self.opt = torch.optim.Adam([self.patch_param], lr=self.lr)
+      self.scheduler = ExponentialLR(self.opt, gamma=self.lr_scheduler_gamma) if self.lr_scheduler else None
+
+      # TV regularizer weight (can expose to config)
+      self.tv_weight = getattr(config.loss, 'tv_weight', 1e-4)
+
       
       # # Define optimizer
       # self.optimizer = torch.optim.SGD(params = [self.patch],
@@ -116,6 +131,84 @@ class PatchTrainer():
       self.current_epoch = 0
       self.current_iteration = 0
 
+  # ---------------------
+  # Patch parametrization & inits
+  # ---------------------
+  def get_patch(self):
+      # maps R -> [0,1] smoothly and avoids exact 0/1 saturation
+      return 0.5 * (torch.tanh(self.patch_param) + 1.0) * 0.999
+
+  def init_lowfreq_tanh(self, shape, cutoff=0.2):
+      """Low-frequency FFT init in [0,1], then inverse tanh to get patch_param."""
+      C,H,W = shape
+      device = self.device
+      # random complex spectrum
+      spec = torch.randn(C,H,W, dtype=torch.complex64, device=device)
+      yy, xx = torch.meshgrid(
+          torch.linspace(-1,1,H,device=device),
+          torch.linspace(-1,1,W,device=device), indexing='ij')
+      rad = (xx**2 + yy**2).sqrt()
+      mask = (rad <= cutoff)
+      spec = spec * mask  # keep low-freq only
+      img = torch.fft.ifft2(spec).real
+      # normalize to [0,1]
+      img = (img - img.amin(dim=(-2,-1), keepdim=True))
+      img = img / (img.amax(dim=(-2,-1), keepdim=True) - img.amin(dim=(-2,-1), keepdim=True) + 1e-8)
+      # inverse tanh
+      z = (img*2 - 1).clamp(-0.999, 0.999)
+      param = torch.atanh(z).detach().to(device)
+      param.requires_grad_(True)
+      return param
+
+  def init_perlin_tanh(self, shape):
+      import torch.nn.functional as F
+      C,H,W = shape; device = self.device
+      def perlin_octave(freq, amp):
+          grid = torch.rand(2, freq+1, freq+1, device=device)
+          noise = F.interpolate(grid.unsqueeze(0), size=(H,W), mode='bilinear', align_corners=True)[0]
+          # simple directional mix
+          xs = torch.linspace(0,1,W,device=device)
+          ys = torch.linspace(0,1,H,device=device)
+          n = noise[0][None,:,:]*xs + noise[1][:,None]*ys
+          return amp * (n - n.min()) / (n.max()-n.min()+1e-8)
+      base = sum(perlin_octave(f,a) for f,a in [(4,0.5),(8,0.25),(16,0.15),(32,0.10)])
+      base = base.clamp(0,1)
+      img = torch.stack([base for _ in range(C)], dim=0)
+      z = (img*2 - 1).clamp(-0.999, 0.999)
+      param = torch.atanh(z).detach(); param.requires_grad_(True)
+      return param.to(device)
+
+  def init_dataset_color_tanh(self, shape, mean=(0.286,0.325,0.283)):
+      C,H,W = shape; device = self.device
+      mean = torch.tensor(mean, device=device)[:,None,None]
+      lowf = (torch.rand(C,H,W, device=device)*0.1 - 0.05)
+      img = (mean + lowf).clamp(0,1)
+      z = (img*2 - 1).clamp(-0.999, 0.999)
+      param = torch.atanh(z).detach(); param.requires_grad_(True)
+      return param.to(device)
+
+  # ---------------------
+  # Light patch-space EOT (keeps patch size SxS)
+  # ---------------------
+  def eot_transform_patch(self, patch):
+      # patch: (3,S,S) in [0,1]
+      angle = random.uniform(-20, 20)
+      scale = random.uniform(0.8, 1.2)
+      shear = [random.uniform(-5,5), random.uniform(-5,5)]
+      # affine keeps size; translate kept 0 because apply_patch chooses location
+      patch_t = TF.affine(patch, angle=angle, translate=[0,0], scale=scale, shear=shear)
+      # mild color jitter to simulate print/camera shifts
+      patch_t = TF.adjust_brightness(patch_t, random.uniform(0.85, 1.15))
+      patch_t = TF.adjust_contrast(patch_t,  random.uniform(0.85, 1.15))
+      return patch_t.clamp(0,1)
+
+  # ---------------------
+  # Total variation for smoothness / physical robustness
+  # ---------------------
+  def tv_loss(self, x):
+      return ((x[:,:,:-1,:]-x[:,:,1:,:]).abs().mean() +
+              (x[:,:,:,:-1]-x[:,:,:,1:]).abs().mean())
+
   def train(self):
     epochs, iters_per_epoch, max_iters = self.epochs, self.iters_per_epoch, self.max_iters
     start_epoch=0
@@ -134,12 +227,17 @@ class PatchTrainer():
           samplecnt += batch[0].shape[0]
           image, true_label,_, _, _ = batch
           image, true_label = image.to(self.device), true_label.to(self.device)
-          
+          samplecnt += image.shape[0]
 
-              
+          # ---- get current patch & apply light EOT on patch ----
+          patch = self.get_patch()                     # (3,S,S) in [0,1]
+          patch = self.eot_transform_patch(patch)      # optional EOT on patch itself
+
+          # ---- paste patch (your existing function) ----
+          patched_image, patched_label = self.apply_patch(image, true_label, patch)      
           
           # Randomly place patch in image and label(put ignore index)
-          patched_image, patched_label = self.apply_patch(image,true_label,self.patch)
+          #patched_image, patched_label = self.apply_patch(image,true_label,self.patch)
           # fig = plt.figure()
           # ax = fig.add_subplot(1,2,1)
           # ax.imshow(patched_image[0].permute(1,2,0).cpu().detach().numpy())
