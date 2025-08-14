@@ -295,8 +295,8 @@ class PatchTrainer():
           samplecnt += image.shape[0]
 
           # ---- get current patch & apply light EOT on patch ----
-          patch = self.get_patch()                     # (3,S,S) in [0,1]
-          patch = self.eot_transform_patch(patch)      # optional EOT on patch itself
+          #patch = self.get_patch()                     # (3,S,S) in [0,1]
+          patch = self.eot_transform_patch(self.patch)      # optional EOT on patch itself
 
           # ---- paste patch (your existing function) ----
           patched_image, patched_label = self.apply_patch(image, true_label, patch) 
