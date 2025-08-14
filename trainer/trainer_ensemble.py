@@ -139,6 +139,23 @@ class PatchTrainer():
       self.current_epoch = 0
       self.current_iteration = 0
 
+     ##---------------------------ENSEMBLE----------------------------#
+     # build a small surrogate set (CNN + ViT)
+    self.ensemble = []
+    surrogate_names = ['pidnet_s', 'bisenet_v2', 'segformer_b2']  # adjust to what you have
+    for name in surrogate_names:
+        cfg_m = copy.deepcopy(self.config)
+        cfg_m.model.name = name
+        m = Models(cfg_m); m.get()
+        m.model.eval()
+        for p in m.model.parameters():
+            p.requires_grad_(False)
+        self.ensemble.append(m)
+
+# sampler: pick K models each iter to save compute
+self.ens_sample_size = getattr(self.config.attack, 'ens_k', 2)  # e.g., 2 of them per step
+self.ens_tau = getattr(self.config.attack, 'ens_tau', 0.1)      # smooth-max temperature
+
 
   def _normalize_01(self, x):
     # x: (C,H,W)
@@ -327,14 +344,32 @@ class PatchTrainer():
               num_correct = correct_pixels.sum().item()
           
           if num_correct > 0:
-              self.logger.info(f"Batch {i_iter}: {num_correct} correctly predicted pixels remaining.")
+              stage_name = "S1"
+              # Option A (simple): anchor only
               loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
           else:
-              loss = self.criterion.compute_loss_transegpgd_stage2_js(output, patched_label, clean_output)
-              #loss = self.criterion.compute_loss_transegpgd_stage2(output, patched_label, clean_output)
-              # Compute adaptive loss
-              #loss = self.criterion.compute_loss(output, patched_label)
-              #loss = self.criterion.compute_loss_direct(output, patched_label)
+              stage_name = "S2-JS"
+              # sample K surrogates this step
+              models_k = random.sample(self.ensemble, k=min(self.ens_sample_size, len(self.ensemble)))
+              per_model_losses = []
+          
+              # include the anchor model as well (helps stability)
+              loss_anchor = self.criterion.compute_loss_transegpgd_stage2_js(output, patched_label, clean_output)
+              per_model_losses.append(loss_anchor)
+          
+              for m in models_k:
+                  out_m = m.predict(patched_image, patched_label.shape)
+                  with torch.no_grad():
+                      clean_m = m.predict(image, patched_label.shape)
+                  per_model_losses.append(self.criterion.compute_loss_transegpgd_stage2_js(out_m, patched_label, clean_m))
+          
+              # aggregate: smooth max (focus on hardest model)
+              if self.ens_tau > 0:
+                  Ls = torch.stack(per_model_losses)  # [M]
+                  loss = self.ens_tau * torch.logsumexp(Ls / self.ens_tau, dim=0) - self.ens_tau * torch.log(torch.tensor(len(per_model_losses), device=Ls.device, dtype=Ls.dtype))
+              else:
+                  # fallback: simple average
+                  loss = torch.stack(per_model_losses).mean()
 
           #loss = self.criterion.compute_loss_transegpgd(output, patched_label, clean_output)
 
