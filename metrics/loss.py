@@ -38,11 +38,24 @@ class PatchLoss(nn.Module):
         self.current_epoch = 0
         self.register_buffer('ema_kl', torch.zeros(1, device=self.device))
 
+        # initialize stage weights from schedulers
+        self.gamma = self.gamma_sched.get(0)
+        self.beta  = self.beta_sched.get(0)
+
         # hyper-params
         self.margin = getattr(config.attack, 'margin', 0.1)
         self.lambda_ent = getattr(config.attack, 'lambda_ent', 0.1)
         self.eta = getattr(config.attack, 'eta', 0.5)
         self.use_feat_div = getattr(config.attack, 'use_feat_div', False)
+
+    def set_epoch(self, epoch: int):
+        """Update stage weights each epoch."""
+        self.current_epoch = int(epoch)
+        # stage-1 weight
+        self.gamma = self.gamma_sched.get(self.current_epoch)
+        # stage-2 schedule runs after stage-1; map epoch into [0, E2]
+        e2 = max(0, self.current_epoch - int(self.gamma_sched.total))
+        self.beta = self.beta_sched.get(e2)
 
     def compute_loss_transegpgd_stage1(self, pred, target, clean_pred):
         """
@@ -88,6 +101,49 @@ class PatchLoss(nn.Module):
                         self.beta * loss[low_transfer_mask].sum()
 
         return loss_weighted / total_pixels
+
+    @staticmethod
+    def _js_div_map_from_logits(pred_logits, clean_logits, eps=1e-6):
+        """
+        Returns per-pixel Jensen–Shannon divergence between softmax(pred) and softmax(clean).
+        Shape: (N, H, W). Differentiable w.r.t. pred_logits.
+        """
+        # probs
+        p = F.softmax(pred_logits, dim=1)
+        q = F.softmax(clean_logits, dim=1)
+        m = 0.5 * (p + q)
+    
+        # logs (avoid log(0))
+        log_p = torch.log(p.clamp_min(eps))
+        log_q = torch.log(q.clamp_min(eps))
+        log_m = torch.log(m.clamp_min(eps))
+    
+        # JS = 0.5*KL(p||m) + 0.5*KL(q||m)
+        kl_pm = (p * (log_p - log_m)).sum(dim=1)  # (N,H,W)
+        kl_qm = (q * (log_q - log_m)).sum(dim=1)  # (N,H,W)
+        js = 0.5 * (kl_pm + kl_qm)
+        return js
+
+    def compute_loss_transegpgd_stage2_js(self, pred, target, clean_pred):
+        """
+        Stage 2 (JS): emphasize high-transferability pixels measured by per-pixel JS(pred, clean).
+        """
+        pred = pred.float()
+        target = target.long()
+    
+        js_map = self._js_div_map_from_logits(pred, clean_pred)         # (N,H,W)
+        valid  = (target != self.ignore_index)
+    
+        js_mean = js_map[valid].mean() if valid.any() else js_map.mean()
+        high_transfer_mask = (js_map >  js_mean) & valid
+        low_transfer_mask  = (js_map <= js_mean) & valid
+    
+        ce = F.cross_entropy(pred, target, ignore_index=self.ignore_index, reduction='none')  # (N,H,W)
+    
+        total = float(high_transfer_mask.sum() + low_transfer_mask.sum() + 1e-8)
+        loss_weighted = (1 - self.beta) * ce[high_transfer_mask].sum() + \
+                         self.beta     * ce[low_transfer_mask].sum()
+        return loss_weighted / total
 
     def compute_loss_transegpgd(self,output, patched_label, clean_output):
 
