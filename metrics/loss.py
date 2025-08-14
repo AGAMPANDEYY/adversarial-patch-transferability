@@ -128,6 +128,7 @@ class PatchLoss(nn.Module):
         """
         Stage 2 (JS): emphasize high-transferability pixels measured by per-pixel JS(pred, clean).
         """
+        print("JS Divergence Stage 2 loss")
         pred = pred.float()
         target = target.long()
     
