@@ -92,7 +92,7 @@ class PatchTrainer():
       self.model.get()
 
       ## loss
-      self.criterion = PatchLoss(self.config)
+      self.criterion = PatchLoss(self.config, self.logger)
 
       ## optimizer
       # Initialize adversarial patch (random noise)
