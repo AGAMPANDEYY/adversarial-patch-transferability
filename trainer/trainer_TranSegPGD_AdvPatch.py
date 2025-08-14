@@ -95,23 +95,28 @@ class PatchTrainer():
 
       ## optimizer
       # Initialize adversarial patch (random noise)
-      self.patch = torch.rand((3, self.patch_size, self.patch_size), 
-                              requires_grad=True, 
-                              device=self.device)
+      # (A) Low-frequency via blur  (simple & solid default)
+      self.patch = self.init_lowfreq_patch((3, self.patch_size, self.patch_size), k=31)
+      
+      # (B) Multi-octave Perlin-ish
+      # self.patch = self.init_perlin_patch((3, self.patch_size, self.patch_size))
+      
+      # (C) Color-matched low-frequency (Cityscapes)
+      # self.patch = self.init_color_matched_lowfreq((3, self.patch_size, self.patch_size), k=31)
 
       # ===== NEW: tanh-parameterized patch with low-frequency init =====
-      self.patch_param = self.init_lowfreq_tanh((3, self.patch_size, self.patch_size), cutoff=0.2)
+      #self.patch_param = self.init_lowfreq_tanh((3, self.patch_size, self.patch_size), cutoff=0.2)
 
       # (optional) choose another init by swapping the line above with:
       # self.patch_param = self.init_perlin_tanh((3, self.S, self.S))
       # self.patch_param = self.init_dataset_color_tanh((3, self.S, self.S), mean=(0.286,0.325,0.283))
 
       # Optimizer (Adam is typically more stable than per-step FGSM)
-      self.opt = torch.optim.Adam([self.patch_param], lr=self.lr)
-      self.scheduler = ExponentialLR(self.opt, gamma=self.lr_scheduler_gamma) if self.lr_scheduler else None
+      #self.opt = torch.optim.Adam([self.patch_param], lr=self.lr)
+      #self.scheduler = ExponentialLR(self.opt, gamma=self.lr_scheduler_gamma) if self.lr_scheduler else None
 
       # TV regularizer weight (can expose to config)
-      self.tv_weight = getattr(config.loss, 'tv_weight', 1e-4)
+      #self.tv_weight = getattr(config.loss, 'tv_weight', 1e-4)
 
       
       # # Define optimizer
@@ -132,6 +137,55 @@ class PatchTrainer():
 
       self.current_epoch = 0
       self.current_iteration = 0
+
+
+  def _normalize_01(self, x):
+    # x: (C,H,W)
+    mn = x.amin(dim=(-2,-1), keepdim=True)
+    mx = x.amax(dim=(-2,-1), keepdim=True)
+    return (x - mn) / (mx - mn + 1e-8)
+
+  def init_lowfreq_patch(self, shape, k=31):
+      """
+      Very simple low-pass init: blur random noise with a big avg-pool kernel.
+      Keeps more energy at low spatial freq; returns (C,H,W) in [0,1] with grad.
+      """
+      C,H,W = shape
+      x = torch.rand(1, C, H, W, device=self.device)
+      x = F.avg_pool2d(x, kernel_size=k, stride=1, padding=k//2)  # low-pass
+      x = x[0]
+      x = self._normalize_01(x)
+      x.requires_grad_(True)
+      return x
+  
+  def init_perlin_patch(self, shape, octaves=(4,8,16,32), amps=(0.5,0.25,0.15,0.10)):
+      """
+      Procedural (Perlin-ish) multi-octave init using upsampled random grids.
+      Returns (C,H,W) in [0,1] with grad.
+      """
+      C,H,W = shape
+      base = 0.0
+      for f,a in zip(octaves, amps):
+          g = torch.rand(1, 1, f+1, f+1, device=self.device)  # coarse noise
+          n = F.interpolate(g, size=(H,W), mode='bilinear', align_corners=True)
+          base = base + a * n
+      base = base[0,0]
+      base = (base - base.min()) / (base.max() - base.min() + 1e-8)
+      img = base.expand(C, H, W).contiguous()
+      img.requires_grad_(True)
+      return img
+  
+  def init_color_matched_lowfreq(self, shape, mean=(0.286,0.325,0.283), k=31, jitter=0.05):
+      """
+      Low-pass init biased to Cityscapes mean colors; helps photometric robustness.
+      """
+      C,H,W = shape
+      mean = torch.tensor(mean, device=self.device)[:,None,None]
+      noise = torch.rand(C, H, W, device=self.device) * (2*jitter) - jitter
+      img = (mean + noise).clamp(0,1)[None]  # (1,C,H,W)
+      img = F.avg_pool2d(img, kernel_size=k, stride=1, padding=k//2)[0]
+      img.requires_grad_(True)
+      return img
 
   # ---------------------
   # Patch parametrization & inits
