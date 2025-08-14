@@ -50,6 +50,8 @@ class PatchLoss(nn.Module):
 
         self.logger = main_logger
 
+        self.calls_stage1 = self.calls_stage2_js = 0
+
     def set_epoch(self, epoch: int):
         """Update stage weights each epoch."""
         self.current_epoch = int(epoch)
@@ -63,6 +65,7 @@ class PatchLoss(nn.Module):
         """
         Stage 1: emphasize hard-to-attack pixels (correctly predicted ones).
         """
+        self.calls_stage1 += 1
         N, C, H, W = pred.shape
         pred_softmax = F.softmax(pred, dim=1)
         target_flat = target.view(-1)
@@ -130,6 +133,7 @@ class PatchLoss(nn.Module):
         """
         Stage 2 (JS): emphasize high-transferability pixels measured by per-pixel JS(pred, clean).
         """
+        self.calls_stage2_js += 1
         self.logger.info('-------------JS Divergence Stage 2 loss--------------------------------')
         pred = pred.float()
         target = target.long()
