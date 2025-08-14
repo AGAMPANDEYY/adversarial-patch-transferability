@@ -208,8 +208,16 @@ class PatchTrainer():
   # Total variation for smoothness / physical robustness
   # ---------------------
   def tv_loss(self, x):
-      return ((x[:,:,:-1,:]-x[:,:,1:,:]).abs().mean() +
-              (x[:,:,:,:-1]-x[:,:,:,1:]).abs().mean())
+    if x.dim() == 4:  # (N,C,H,W)
+        tv_h = (x[:, :, 1:, :] - x[:, :, :-1, :]).abs().mean()
+        tv_w = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs().mean()
+    elif x.dim() == 3:  # (C,H,W) -> your patch
+        tv_h = (x[:, 1:, :] - x[:, :-1, :]).abs().mean()
+        tv_w = (x[:, :, 1:] - x[:, :, :-1]).abs().mean()
+    else:
+        raise ValueError(f"tv_loss expects 3D or 4D tensor, got {x.dim()}D")
+    return tv_h + tv_w
+
 
   def train(self):
     epochs, iters_per_epoch, max_iters = self.epochs, self.iters_per_epoch, self.max_iters
@@ -236,7 +244,8 @@ class PatchTrainer():
           patch = self.eot_transform_patch(patch)      # optional EOT on patch itself
 
           # ---- paste patch (your existing function) ----
-          patched_image, patched_label = self.apply_patch(image, true_label, patch)      
+          patched_image, patched_label = self.apply_patch(image, true_label, patch) 
+          patched_label = patched_label.to(self.device).long() 
           
           # Randomly place patch in image and label(put ignore index)
           #patched_image, patched_label = self.apply_patch(image,true_label,self.patch)
