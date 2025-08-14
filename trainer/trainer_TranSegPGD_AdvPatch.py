@@ -22,6 +22,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import random
 import torchvision.transforms.functional as TF
+import torch.nn.functional as F
 
 # Restore original sys.path to avoid conflicts or shadowing
 sys.path = original_sys_path
