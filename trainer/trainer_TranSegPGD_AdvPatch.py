@@ -285,6 +285,8 @@ class PatchTrainer():
     for ep in range(self.start_epoch, self.end_epoch):
       self.current_epoch = ep
       self.metric.reset()
+      if hasattr(self.criterion, "set_epoch"):
+        self.criterion.set_epoch(ep)
       total_loss = 0
       samplecnt = 0
       for i_iter, batch in enumerate(self.train_dataloader, 0):
@@ -328,7 +330,8 @@ class PatchTrainer():
               self.logger.info(f"Batch {i_iter}: {num_correct} correctly predicted pixels remaining.")
               loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
           else:
-              loss = self.criterion.compute_loss_transegpgd_stage2(output, patched_label, clean_output)
+              loss = self.criterion.compute_loss_transegpgd_stage2_js(output, patched_label, clean_output)
+              #loss = self.criterion.compute_loss_transegpgd_stage2(output, patched_label, clean_output)
               # Compute adaptive loss
               #loss = self.criterion.compute_loss(output, patched_label)
               #loss = self.criterion.compute_loss_direct(output, patched_label)
