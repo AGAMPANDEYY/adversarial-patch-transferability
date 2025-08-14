@@ -98,7 +98,7 @@ class PatchTrainer():
                               device=self.device)
 
       # ===== NEW: tanh-parameterized patch with low-frequency init =====
-      self.patch_param = self.init_lowfreq_tanh((3, self.S, self.S), cutoff=0.2)
+      self.patch_param = self.init_lowfreq_tanh((3, self.patch_size, self.patch_size), cutoff=0.2)
 
       # (optional) choose another init by swapping the line above with:
       # self.patch_param = self.init_perlin_tanh((3, self.S, self.S))
