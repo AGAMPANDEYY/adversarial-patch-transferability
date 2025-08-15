@@ -1,186 +1,127 @@
 import sys
-# Save the original sys.path
 original_sys_path = sys.path.copy()
 sys.path.append("/kaggle/working/adversarial-patch-transferability/")
+
 from dataset.cityscapes import Cityscapes
-
 from pretrained_models.models import Models
-
-from pretrained_models.ICNet.icnet import ICNet
-from pretrained_models.BisNetV1.model import BiSeNetV1
-from pretrained_models.BisNetV2.model import BiSeNetV2
-from pretrained_models.PIDNet.model import PIDNet, get_pred_model
-
 from metrics.performance import SegmentationMetric
 from metrics.loss import PatchLoss
 from patch.create import Patch
 from torch.optim.lr_scheduler import ExponentialLR
-import time
-import torch
-import datetime
-import numpy as np
-import matplotlib.pyplot as plt
-import random
+
+import time, torch, datetime, numpy as np, random, copy
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
-# Restore original sys.path to avoid conflicts or shadowing
 sys.path = original_sys_path
 
+
 class PatchTrainer():
-  def __init__(self,config,main_logger):
+  def __init__(self, config, main_logger):
       self.config = config
       self.start_epoch = config.train.start_epoch
-      self.end_epoch = config.train.end_epoch
-      self.epochs = self.end_epoch - self.start_epoch
+      self.end_epoch   = config.train.end_epoch
+      self.epochs      = self.end_epoch - self.start_epoch
       self.batch_train = config.train.batch_size
-      self.batch_test = config.test.batch_size
-      self.device = config.experiment.device
-      self.logger = main_logger
-      self.lr = config.optimizer.init_lr
-      self.power = config.train.power
-      self.lr_scheduler = config.optimizer.exponentiallr
+      self.batch_test  = config.test.batch_size
+      self.device      = config.experiment.device
+      self.logger      = main_logger
+      self.lr          = config.optimizer.init_lr
+      self.lr_scheduler= config.optimizer.exponentiallr
       self.lr_scheduler_gamma = config.optimizer.exponentiallr_gamma
       self.log_per_iters = config.train.log_per_iters
-      self.patch_size = config.patch.size
-      self.apply_patch = Patch(config).apply_patch
-      self.epsilon = config.optimizer.init_lr
+      self.patch_size   = config.patch.size
+      self.apply_patch  = Patch(config).apply_patch
+      self.epsilon      = config.optimizer.init_lr  # PGD step size
 
+      # ----------------- DATA -----------------
       cityscape_train = Cityscapes(
-          root = config.dataset.root,
-          list_path = config.dataset.train,
-          num_classes = config.dataset.num_classes,
-          multi_scale = config.train.multi_scale,
-          flip = config.train.flip,
-          ignore_label = config.train.ignore_label,
-          base_size = config.train.base_size,
-          crop_size = (config.train.height,config.train.width),
-          scale_factor = config.train.scale_factor
-        )
+          root=config.dataset.root, list_path=config.dataset.train,
+          num_classes=config.dataset.num_classes, multi_scale=config.train.multi_scale,
+          flip=config.train.flip, ignore_label=config.train.ignore_label,
+          base_size=config.train.base_size,
+          crop_size=(config.train.height, config.train.width),
+          scale_factor=config.train.scale_factor)
 
-      cityscape_test = Cityscapes(
-          root = config.dataset.root,
-          list_path = config.dataset.val,
-          num_classes = config.dataset.num_classes,
-          multi_scale = False,
-          flip = False,
-          ignore_label = config.train.ignore_label,
-          base_size = config.test.base_size,
-          crop_size = (config.test.height,config.test.width),
-        )
-      
-      self.train_dataloader = torch.utils.data.DataLoader(dataset=cityscape_train,
-                                              batch_size=self.batch_train,
-                                              shuffle=config.train.shuffle,
-                                              num_workers=config.train.num_workers,
-                                              pin_memory=config.train.pin_memory,
-                                              drop_last=config.train.drop_last)
-      self.test_dataloader = torch.utils.data.DataLoader(dataset=cityscape_test,
-                                            batch_size=self.batch_test,
-                                            shuffle=False,
-                                            num_workers=config.test.num_workers,
-                                            pin_memory=config.test.pin_memory,
-                                            drop_last=config.test.drop_last)
-      
+      cityscape_val = Cityscapes(
+          root=config.dataset.root, list_path=config.dataset.val,
+          num_classes=config.dataset.num_classes, multi_scale=False, flip=False,
+          ignore_label=config.train.ignore_label, base_size=config.test.base_size,
+          crop_size=(config.test.height, config.test.width))
 
+      self.train_dataloader = torch.utils.data.DataLoader(
+          dataset=cityscape_train, batch_size=self.batch_train,
+          shuffle=config.train.shuffle, num_workers=config.train.num_workers,
+          pin_memory=config.train.pin_memory, drop_last=config.train.drop_last)
+
+      self.test_dataloader = torch.utils.data.DataLoader(
+          dataset=cityscape_val, batch_size=self.batch_test, shuffle=False,
+          num_workers=config.test.num_workers, pin_memory=config.test.pin_memory,
+          drop_last=config.test.drop_last)
 
       self.iters_per_epoch = len(self.train_dataloader)
-      self.max_iters = self.end_epoch * self.iters_per_epoch
 
-      ## Getting the model
+      # ----------------- MODELS -----------------
+      # Anchor model (metrics + stage switch)
       self.model = Models(self.config)
       self.model.get()
+      self.model.model.eval()
+      anchor_name = self.config.model.name
 
-      ## loss
+      # Ensemble of frozen surrogates (CNN + ViT)
+      self.ensemble = []
+      default_names = ['pidnet_s', 'pidnet_m', 'bisenet_v2', 'segformer_b2']
+      ens_names = getattr(self.config.attack, 'ensemble_names', default_names)
+
+      for name in ens_names:
+          if name == anchor_name:
+              continue  # avoid duplicate; anchor is already included separately
+          try:
+              cfg_m = copy.deepcopy(self.config)
+              cfg_m.model.name = name
+              m = Models(cfg_m); m.get()
+              m.model.eval()
+              for p in m.model.parameters():
+                  p.requires_grad_(False)
+              self.ensemble.append(m)
+              self.logger.info(f"[Ensemble] added surrogate: {name}")
+          except Exception as e:
+              self.logger.info(f"[Ensemble] WARNING: could not load '{name}': {e}")
+
+      self.ens_sample_size = int(getattr(self.config.attack, 'ens_k', 2))
+      self.ens_tau         = float(getattr(self.config.attack, 'ens_tau', 0.1))  # smooth-max temp
+
+      # ----------------- LOSS -----------------
       self.criterion = PatchLoss(self.config, main_logger)
 
-      ## optimizer
-      # Initialize adversarial patch (random noise)
-      # (A) Low-frequency via blur  (simple & solid default)
+      # ----------------- PATCH (PGD) -----------------
+      # Better init (pick one). Default: low-frequency via blur.
       self.patch = self.init_lowfreq_patch((3, self.patch_size, self.patch_size), k=31)
-      
-      # (B) Multi-octave Perlin-ish
+      # # Alternative:
       # self.patch = self.init_perlin_patch((3, self.patch_size, self.patch_size))
-      
-      # (C) Color-matched low-frequency (Cityscapes)
       # self.patch = self.init_color_matched_lowfreq((3, self.patch_size, self.patch_size), k=31)
 
-      # ===== NEW: tanh-parameterized patch with low-frequency init =====
-      #self.patch_param = self.init_lowfreq_tanh((3, self.patch_size, self.patch_size), cutoff=0.2)
-
-      # (optional) choose another init by swapping the line above with:
-      # self.patch_param = self.init_perlin_tanh((3, self.S, self.S))
-      # self.patch_param = self.init_dataset_color_tanh((3, self.S, self.S), mean=(0.286,0.325,0.283))
-
-      # Optimizer (Adam is typically more stable than per-step FGSM)
-      #self.opt = torch.optim.Adam([self.patch_param], lr=self.lr)
-      #self.scheduler = ExponentialLR(self.opt, gamma=self.lr_scheduler_gamma) if self.lr_scheduler else None
-
-      # TV regularizer weight (can expose to config)
-      #self.tv_weight = getattr(config.loss, 'tv_weight', 1e-4)
-
-      
-      # # Define optimizer
-      # self.optimizer = torch.optim.SGD(params = [self.patch],
-      #                         lr=self.lr,
-      #                         momentum=config.optimizer.momentum,
-      #                         weight_decay=config.optimizer.weight_decay,
-      #                         nesterov=config.optimizer.nesterov,
-      # )
-      # if self.lr_scheduler:
-      #   self.scheduler = ExponentialLR(self.optimizer, gamma=self.lr_scheduler_gamma)
-
-
-      ## Initializing quantities
-      self.metric = SegmentationMetric(config) 
-      self.current_mIoU = 0.0
-      self.best_mIoU = 0.0
-
+      # ----------------- METRICS/STATE -----------------
+      self.metric = SegmentationMetric(config)
       self.current_epoch = 0
       self.current_iteration = 0
 
-     ##---------------------------ENSEMBLE----------------------------#
-     # build a small surrogate set (CNN + ViT)
-    self.ensemble = []
-    surrogate_names = ['pidnet_s', 'bisenet_v2', 'segformer_b2']  # adjust to what you have
-    for name in surrogate_names:
-        cfg_m = copy.deepcopy(self.config)
-        cfg_m.model.name = name
-        m = Models(cfg_m); m.get()
-        m.model.eval()
-        for p in m.model.parameters():
-            p.requires_grad_(False)
-        self.ensemble.append(m)
-
-# sampler: pick K models each iter to save compute
-self.ens_sample_size = getattr(self.config.attack, 'ens_k', 2)  # e.g., 2 of them per step
-self.ens_tau = getattr(self.config.attack, 'ens_tau', 0.1)      # smooth-max temperature
-
-
-  def _normalize_01(self, x):
-    # x: (C,H,W)
-    mn = x.amin(dim=(-2,-1), keepdim=True)
-    mx = x.amax(dim=(-2,-1), keepdim=True)
-    return (x - mn) / (mx - mn + 1e-8)
+  # ---------- initializers ----------
+  def _normalize_01(self, x):  # x: (C,H,W)
+      mn = x.amin(dim=(-2,-1), keepdim=True)
+      mx = x.amax(dim=(-2,-1), keepdim=True)
+      return (x - mn) / (mx - mn + 1e-8)
 
   def init_lowfreq_patch(self, shape, k=31):
-      """
-      Very simple low-pass init: blur random noise with a big avg-pool kernel.
-      Keeps more energy at low spatial freq; returns (C,H,W) in [0,1] with grad.
-      """
       C,H,W = shape
       x = torch.rand(1, C, H, W, device=self.device)
-      x = F.avg_pool2d(x, kernel_size=k, stride=1, padding=k//2)  # low-pass
-      x = x[0]
-      x = self._normalize_01(x)
+      x = F.avg_pool2d(x, kernel_size=k, stride=1, padding=k//2)  # low-pass blur
+      x = self._normalize_01(x[0])                                # (C,H,W) in [0,1]
       x.requires_grad_(True)
       return x
-  
+
   def init_perlin_patch(self, shape, octaves=(4,8,16,32), amps=(0.5,0.25,0.15,0.10)):
-      """
-      Procedural (Perlin-ish) multi-octave init using upsampled random grids.
-      Returns (C,H,W) in [0,1] with grad.
-      """
       C,H,W = shape
       base = 0.0
       for f,a in zip(octaves, amps):
@@ -192,11 +133,8 @@ self.ens_tau = getattr(self.config.attack, 'ens_tau', 0.1)      # smooth-max tem
       img = base.expand(C, H, W).contiguous()
       img.requires_grad_(True)
       return img
-  
+
   def init_color_matched_lowfreq(self, shape, mean=(0.286,0.325,0.283), k=31, jitter=0.05):
-      """
-      Low-pass init biased to Cityscapes mean colors; helps photometric robustness.
-      """
       C,H,W = shape
       mean = torch.tensor(mean, device=self.device)[:,None,None]
       noise = torch.rand(C, H, W, device=self.device) * (2*jitter) - jitter
@@ -205,223 +143,132 @@ self.ens_tau = getattr(self.config.attack, 'ens_tau', 0.1)      # smooth-max tem
       img.requires_grad_(True)
       return img
 
-  # ---------------------
-  # Patch parametrization & inits
-  # ---------------------
-  def get_patch(self):
-      # maps R -> [0,1] smoothly and avoids exact 0/1 saturation
-      return 0.5 * (torch.tanh(self.patch_param) + 1.0) * 0.999
-
-  def init_lowfreq_tanh(self, shape, cutoff=0.2):
-      """Low-frequency FFT init in [0,1], then inverse tanh to get patch_param."""
-      C,H,W = shape
-      device = self.device
-      # random complex spectrum
-      spec = torch.randn(C,H,W, dtype=torch.complex64, device=device)
-      yy, xx = torch.meshgrid(
-          torch.linspace(-1,1,H,device=device),
-          torch.linspace(-1,1,W,device=device), indexing='ij')
-      rad = (xx**2 + yy**2).sqrt()
-      mask = (rad <= cutoff)
-      spec = spec * mask  # keep low-freq only
-      img = torch.fft.ifft2(spec).real
-      # normalize to [0,1]
-      img = (img - img.amin(dim=(-2,-1), keepdim=True))
-      img = img / (img.amax(dim=(-2,-1), keepdim=True) - img.amin(dim=(-2,-1), keepdim=True) + 1e-8)
-      # inverse tanh
-      z = (img*2 - 1).clamp(-0.999, 0.999)
-      param = torch.atanh(z).detach().to(device)
-      param.requires_grad_(True)
-      return param
-
-  def init_perlin_tanh(self, shape):
-      import torch.nn.functional as F
-      C,H,W = shape; device = self.device
-      def perlin_octave(freq, amp):
-          grid = torch.rand(2, freq+1, freq+1, device=device)
-          noise = F.interpolate(grid.unsqueeze(0), size=(H,W), mode='bilinear', align_corners=True)[0]
-          # simple directional mix
-          xs = torch.linspace(0,1,W,device=device)
-          ys = torch.linspace(0,1,H,device=device)
-          n = noise[0][None,:,:]*xs + noise[1][:,None]*ys
-          return amp * (n - n.min()) / (n.max()-n.min()+1e-8)
-      base = sum(perlin_octave(f,a) for f,a in [(4,0.5),(8,0.25),(16,0.15),(32,0.10)])
-      base = base.clamp(0,1)
-      img = torch.stack([base for _ in range(C)], dim=0)
-      z = (img*2 - 1).clamp(-0.999, 0.999)
-      param = torch.atanh(z).detach(); param.requires_grad_(True)
-      return param.to(device)
-
-  def init_dataset_color_tanh(self, shape, mean=(0.286,0.325,0.283)):
-      C,H,W = shape; device = self.device
-      mean = torch.tensor(mean, device=device)[:,None,None]
-      lowf = (torch.rand(C,H,W, device=device)*0.1 - 0.05)
-      img = (mean + lowf).clamp(0,1)
-      z = (img*2 - 1).clamp(-0.999, 0.999)
-      param = torch.atanh(z).detach(); param.requires_grad_(True)
-      return param.to(device)
-
-  # ---------------------
-  # Light patch-space EOT (keeps patch size SxS)
-  # ---------------------
+  # ---------- patch-space EOT (optional) ----------
   def eot_transform_patch(self, patch):
-      # patch: (3,S,S) in [0,1]
       angle = random.uniform(-20, 20)
       scale = random.uniform(0.8, 1.2)
       shear = [random.uniform(-5,5), random.uniform(-5,5)]
-      # affine keeps size; translate kept 0 because apply_patch chooses location
-      patch_t = TF.affine(patch, angle=angle, translate=[0,0], scale=scale, shear=shear)
-      # mild color jitter to simulate print/camera shifts
-      patch_t = TF.adjust_brightness(patch_t, random.uniform(0.85, 1.15))
-      patch_t = TF.adjust_contrast(patch_t,  random.uniform(0.85, 1.15))
-      return patch_t.clamp(0,1)
+      p = TF.affine(patch, angle=angle, translate=[0,0], scale=scale, shear=shear)
+      p = TF.adjust_brightness(p, random.uniform(0.85, 1.15))
+      p = TF.adjust_contrast(p,  random.uniform(0.85, 1.15))
+      return p.clamp(0,1)
 
-  # ---------------------
-  # Total variation for smoothness / physical robustness
-  # ---------------------
-  def tv_loss(self, x):
-    if x.dim() == 4:  # (N,C,H,W)
-        tv_h = (x[:, :, 1:, :] - x[:, :, :-1, :]).abs().mean()
-        tv_w = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs().mean()
-    elif x.dim() == 3:  # (C,H,W) -> your patch
-        tv_h = (x[:, 1:, :] - x[:, :-1, :]).abs().mean()
-        tv_w = (x[:, :, 1:] - x[:, :, :-1]).abs().mean()
-    else:
-        raise ValueError(f"tv_loss expects 3D or 4D tensor, got {x.dim()}D")
-    return tv_h + tv_w
-
-
+  # ---------- train ----------
   def train(self):
-    epochs, iters_per_epoch, max_iters = self.epochs, self.iters_per_epoch, self.max_iters
-    start_epoch=0
-    switch_epoch=(start_epoch+self.end_epoch)//2
+      epochs, iters_per_epoch = self.epochs, self.iters_per_epoch
+      start_time = time.time()
+      self.logger.info('Start training, Total Epochs: {:d} = Iterations per epoch {:d}'.format(epochs, iters_per_epoch))
+      IoU = []
 
-    start_time = time.time()
-    self.logger.info('Start training, Total Epochs: {:d} = Iterations per epoch {:d}'.format(epochs, iters_per_epoch))
-    IoU = []
-    for ep in range(self.start_epoch, self.end_epoch):
-      self.current_epoch = ep
-      self.metric.reset()
-      if hasattr(self.criterion, "set_epoch"):
-        self.criterion.set_epoch(ep)
-      total_loss = 0
-      samplecnt = 0
-      for i_iter, batch in enumerate(self.train_dataloader, 0):
-          self.current_iteration += 1
-          samplecnt += batch[0].shape[0]
-          image, true_label,_, _, _ = batch
-          image, true_label = image.to(self.device), true_label.to(self.device)
-          samplecnt += image.shape[0]
+      for ep in range(self.start_epoch, self.end_epoch):
+          self.current_epoch = ep
+          self.metric.reset()
+          if hasattr(self.criterion, "set_epoch"):
+              self.criterion.set_epoch(ep)
 
-          # ---- get current patch & apply light EOT on patch ----
-          #patch = self.get_patch()                     # (3,S,S) in [0,1]
-          patch = self.eot_transform_patch(self.patch)      # optional EOT on patch itself
+          total_loss = 0.0
+          samplecnt = 0
 
-          # ---- paste patch (your existing function) ----
-          patched_image, patched_label = self.apply_patch(image, true_label, patch) 
-          patched_label = patched_label.to(self.device).long() 
-          
-          # Randomly place patch in image and label(put ignore index)
-          #patched_image, patched_label = self.apply_patch(image,true_label,self.patch)
-          # fig = plt.figure()
-          # ax = fig.add_subplot(1,2,1)
-          # ax.imshow(patched_image[0].permute(1,2,0).cpu().detach().numpy())
-          # ax = fig.add_subplot(1,2,2)
-          # ax.imshow(patched_label[0].cpu().detach().numpy())
-          # plt.show()
+          for i_iter, batch in enumerate(self.train_dataloader, 0):
+              self.current_iteration += 1
+              image, true_label, _, _, _ = batch
+              image = image.to(self.device)
+              true_label = true_label.to(self.device)
+              samplecnt += image.shape[0]
 
-          # Forward pass through the model (and interpolation if needed)
-          output = self.model.predict(patched_image,patched_label.shape)
-          #plt.imshow(output.argmax(dim =1)[0].cpu().detach().numpy())
-          #plt.show()
-          #break
-          with torch.no_grad():
-             clean_output = self.model.predict(image, patched_label.shape)
+              # patch (optionally EOT)
+              patch_to_paste = self.eot_transform_patch(self.patch)
 
-          with torch.no_grad():
-              pred_labels = output.argmax(dim=1)  # (N, H, W)
-              correct_pixels = (pred_labels == patched_label) & (patched_label != self.config.train.ignore_label)
-              num_correct = correct_pixels.sum().item()
-          
-          if num_correct > 0:
-              stage_name = "S1"
-              # Option A (simple): anchor only
-              loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
-          else:
-              stage_name = "S2-JS"
-              # sample K surrogates this step
-              models_k = random.sample(self.ensemble, k=min(self.ens_sample_size, len(self.ensemble)))
-              per_model_losses = []
-          
-              # include the anchor model as well (helps stability)
-              loss_anchor = self.criterion.compute_loss_transegpgd_stage2_js(output, patched_label, clean_output)
-              per_model_losses.append(loss_anchor)
-          
-              for m in models_k:
-                  out_m = m.predict(patched_image, patched_label.shape)
-                  with torch.no_grad():
-                      clean_m = m.predict(image, patched_label.shape)
-                  per_model_losses.append(self.criterion.compute_loss_transegpgd_stage2_js(out_m, patched_label, clean_m))
-          
-              # aggregate: smooth max (focus on hardest model)
-              if self.ens_tau > 0:
-                  Ls = torch.stack(per_model_losses)  # [M]
-                  loss = self.ens_tau * torch.logsumexp(Ls / self.ens_tau, dim=0) - self.ens_tau * torch.log(torch.tensor(len(per_model_losses), device=Ls.device, dtype=Ls.dtype))
+              # paste patch
+              patched_image, patched_label = self.apply_patch(image, true_label, patch_to_paste)
+              patched_label = patched_label.to(self.device).long()
+
+              # anchor forward
+              output = self.model.predict(patched_image, patched_label.shape)
+              with torch.no_grad():
+                  clean_output = self.model.predict(image, patched_label.shape)
+
+              # decide stage using anchor
+              with torch.no_grad():
+                  pred_labels = output.argmax(dim=1)
+                  correct_pixels = (pred_labels == patched_label) & (patched_label != self.config.train.ignore_label)
+                  num_correct = int(correct_pixels.sum().item())
+
+              if num_correct > 0:
+                  stage_name = "S1"
+                  sampled_names = ["anchor"]
+                  loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
               else:
-                  # fallback: simple average
-                  loss = torch.stack(per_model_losses).mean()
+                  stage_name = "S2-JS"
+                  per_model_losses = []
+                  sampled_names = ["anchor"]
 
-          #loss = self.criterion.compute_loss_transegpgd(output, patched_label, clean_output)
+                  # anchor contributes
+                  loss_anchor = self.criterion.compute_loss_transegpgd_stage2_js(output, patched_label, clean_output)
+                  per_model_losses.append(loss_anchor)
 
-          total_loss += loss.item()
-          #break
+                  # sample K surrogates
+                  if len(self.ensemble) > 0 and self.ens_sample_size > 0:
+                      models_k = random.sample(self.ensemble, k=min(self.ens_sample_size, len(self.ensemble)))
+                  else:
+                      models_k = []
 
-          ## metrics
-          self.metric.update(output, patched_label)
-          pixAcc, mIoU = self.metric.get()
+                  for m in models_k:
+                      out_m = m.predict(patched_image, patched_label.shape)
+                      with torch.no_grad():
+                          clean_m = m.predict(image, patched_label.shape)
+                      per_model_losses.append(self.criterion.compute_loss_transegpgd_stage2_js(out_m, patched_label, clean_m))
+                      sampled_names.append(getattr(m.config.model, "name", "unk"))
 
-          # Backpropagation
-          self.model.model.zero_grad()
-          if self.patch.grad is not None:
-            self.patch.grad.zero_()
-          loss.backward()
-          with torch.no_grad():
-              #self.patch += self.epsilon * self.patch.grad.sign()  # Update patch using FGSM-style ascent
-              self.patch += self.epsilon * self.patch.grad.data.sign()
-              self.patch.clamp_(0, 1)  # Keep pixel values in valid range
+                  # aggregate across models: smooth max if tau>0 else average
+                  if len(per_model_losses) == 1:
+                      loss = per_model_losses[0]
+                  elif self.ens_tau > 0:
+                      Ls = torch.stack(per_model_losses)
+                      loss = self.ens_tau * torch.logsumexp(Ls / self.ens_tau, dim=0) \
+                             - self.ens_tau * torch.log(torch.tensor(len(per_model_losses), device=Ls.device, dtype=Ls.dtype))
+                  else:
+                      loss = torch.stack(per_model_losses).mean()
 
-          ## ETA
-          eta_seconds = ((time.time() - start_time) / self.current_iteration) * (iters_per_epoch*epochs - self.current_iteration)
-          eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+              total_loss += float(loss.item())
 
-          if i_iter % self.log_per_iters == 0:
-            self.logger.info(
-              "Epochs: {:d}/{:d} || Samples: {:d}/{:d} || Lr: {:.6f} || Loss: {:.4f} || mIoU: {:.4f} || Cost Time: {} || Estimated Time: {}".format(
-                  self.current_epoch, self.end_epoch,
-                  samplecnt, self.batch_train*iters_per_epoch,
-                  #self.optimizer.param_groups[0]['lr'],
-                  self.epsilon,
-                  loss.item(),
-                  mIoU,
-                  str(datetime.timedelta(seconds=int(time.time() - start_time))),
-                  eta_string))
-          
+              # metrics on anchor
+              self.metric.update(output, patched_label)
+              pixAcc, mIoU = self.metric.get()
 
-      average_pixAcc, average_mIoU = self.metric.get()
-      average_loss = total_loss/len(self.train_dataloader)
-      self.logger.info('-------------------------------------------------------------------------------------------------')
-      self.logger.info("Epochs: {:d}/{:d}, Average loss: {:.3f}, Average mIoU: {:.3f}, Average pixAcc: {:.3f}".format(
-        self.current_epoch, self.epochs, average_loss, average_mIoU, average_pixAcc))
+              # --- PGD update on patch ---
+              self.model.model.zero_grad()
+              if self.patch.grad is not None:
+                  self.patch.grad.zero_()
+              loss.backward()
+              with torch.no_grad():
+                  self.patch += self.epsilon * self.patch.grad.sign()
+                  self.patch.clamp_(0, 1)
 
-      
-      #self.test() ## Doing 1 iteration of testing
-      self.logger.info('-------------------------------------------------------------------------------------------------')
-      #self.model.train() ## Setting the model back to train mode
-      # if self.lr_scheduler:
-      #     self.scheduler.step()
+              # LOG
+              if i_iter % self.log_per_iters == 0:
+                  elapsed = int(time.time() - start_time)
+                  eta = int((elapsed / max(self.current_iteration,1)) * (iters_per_epoch*epochs - self.current_iteration))
+                  self.logger.info(
+                      "Epochs: {:d}/{:d} || Stage:{} || Models:{} || Samples: {:d}/{:d} || Lr: {:.6f} || Loss: {:.4f} || mIoU: {:.4f} || Time: {} || ETA: {}".format(
+                          self.current_epoch, self.end_epoch,
+                          stage_name, ",".join(sampled_names),
+                          samplecnt, self.batch_train*iters_per_epoch,
+                          self.epsilon, loss.item(), mIoU,
+                          str(datetime.timedelta(seconds=elapsed)),
+                          str(datetime.timedelta(seconds=eta))
+                      )
+                  )
 
-      IoU.append(self.metric.get(full=True))
+          avg_pixAcc, avg_mIoU = self.metric.get()
+          avg_loss = total_loss / max(len(self.train_dataloader), 1)
+          self.logger.info('-------------------------------------------------------------------------------------------------')
+          self.logger.info("Epochs: {:d}/{:d}, Average loss: {:.3f}, Average mIoU: {:.3f}, Average pixAcc: {:.3f}".format(
+              self.current_epoch, self.epochs, avg_loss, avg_mIoU, avg_pixAcc))
+          if hasattr(self.criterion, "log_epoch_summary"):
+              self.criterion.log_epoch_summary()
+          self.logger.info('-------------------------------------------------------------------------------------------------')
 
-    return self.patch.detach(),np.array(IoU)  # Return adversarial patch and IoUs over epochs
+          IoU.append(self.metric.get(full=True))
 
-    
+      return self.patch.detach(), np.array(IoU)
