@@ -104,3 +104,8 @@ attack:
 
   # (optional) EOT curriculum flag
   use_hard_eot:  True      # if True, you can detect epoch ≥ stage1_epochs and switch to stronger EOT
+
+  #ensemble
+  ensemble_names: ["pidnet_s","pidnet_m","bisenet_v2","segformer_b2"]
+  ens_k: 2
+  ens_tau: 0.1
