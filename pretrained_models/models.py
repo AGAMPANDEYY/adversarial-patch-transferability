@@ -63,23 +63,50 @@ class Models():
       self.model = icnet
       self.model.eval()
 
-    # ---------------- SegFormer (B2/B5 etc.) ----------------
-    if 'segformer' in self.config.model.name:
-      # map names like segformer_b2 / segformer_b5 → HF IDs
-      name = self.config.model.name
-      hf_id = None
-      if '_b0' in name: hf_id = "nvidia/segformer-b0-finetuned-cityscapes-1024-1024"
-      if '_b1' in name: hf_id = "nvidia/segformer-b1-finetuned-cityscapes-1024-1024"
-      if '_b2' in name: hf_id = "nvidia/segformer-b2-finetuned-cityscapes-1024-1024"
-      if '_b3' in name: hf_id = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
-      if '_b4' in name: hf_id = "nvidia/segformer-b4-finetuned-cityscapes-1024-1024"
-      if '_b5' in name or hf_id is None:
-        hf_id = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
-
-      # NOTE: We do not use the FeatureExtractor in forward here; we assume inputs are already resized/normalized by the dataset pipeline.
-      self.segformer_id = hf_id
-      self.model = SegformerForSemanticSegmentation.from_pretrained(hf_id).to(self.device)
+   # ---------------- SegFormer (B0/B1/B2/B3/B4/B5) ----------------
+  if 'segformer' in self.config.model.name:
+      from transformers import SegformerForSemanticSegmentation
+  
+      # decide variant (only used when falling back to HF weights)
+      name = self.config.model.segformer_name
+      if   '_b0' in name: hf_id = "nvidia/segformer-b0-finetuned-cityscapes-1024-1024"
+      elif '_b1' in name: hf_id = "nvidia/segformer-b1-finetuned-cityscapes-1024-1024"
+      elif '_b2' in name: hf_id = "nvidia/segformer-b2-finetuned-cityscapes-1024-1024"
+      elif '_b3' in name: hf_id = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+      elif '_b4' in name: hf_id = "nvidia/segformer-b4-finetuned-cityscapes-1024-1024"
+      else:               hf_id = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
+  
+      num_labels = getattr(self.config.dataset, "num_classes", 19)
+      local_dir  = getattr(self.config.model, "segformer_ckpt_dir", None)   # folder with HF files
+      local_pth  = getattr(self.config.model, "segformer_ckpt", None)       # single .pth file
+  
+      if local_dir and os.path.isdir(local_dir):
+          # load a local HF repo (has config.json + pytorch_model.bin)
+          model = SegformerForSemanticSegmentation.from_pretrained(
+              local_dir, num_labels=num_labels, ignore_mismatched_sizes=True
+          ).to(self.device)
+      else:
+          # build HF model first, then (optionally) load a local HF-style .pth state_dict
+          model = SegformerForSemanticSegmentation.from_pretrained(
+              hf_id, num_labels=num_labels, ignore_mismatched_sizes=True
+          ).to(self.device)
+  
+          if local_pth and os.path.isfile(local_pth):
+              sd = torch.load(local_pth, map_location='cpu')
+              if isinstance(sd, dict) and 'state_dict' in sd:
+                  sd = sd['state_dict']
+              # quick heuristic: if it looks like MMSeg, warn (see Option 2 below)
+              mmseg_like = any(k.startswith('backbone.') or k.startswith('decode_head.') for k in sd.keys())
+              if mmseg_like:
+                  print(f"[SegFormer] '{local_pth}' looks like an MMSeg checkpoint. "
+                        f"Direct load into HF model won't match keys. See Option 2.")
+              else:
+                  missing, unexpected = model.load_state_dict(sd, strict=False)
+                  print(f"[SegFormer] Loaded local HF-style .pth. Missing={len(missing)}, Unexpected={len(unexpected)}")
+  
+      self.model = model
       self.model.eval()
+
 
 
   def predict(self,image_standard,size):
