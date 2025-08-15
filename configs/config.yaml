@@ -7,6 +7,11 @@ experiment:
 ### 1.Model
 model:
   name: 'pidnet_s'
+  segformer_name: 'segformer_b0'
+  # If you have a local HF folder (config.json + pytorch_model.bin):
+  segformer_ckpt_dir: /kaggle/input/my_local_hf_segformer_dir
+  # OR if you saved an HF-style state_dict to a .pth:
+  segformer_ckpt: /kaggle/input/segformer_b0_hf_style/my_state_dict.pth
 
 ### 2. Data
 dataset:
