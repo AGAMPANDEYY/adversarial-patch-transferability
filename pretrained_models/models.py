@@ -63,10 +63,22 @@ class Models():
       self.model = icnet
       self.model.eval()
 
+    # ---------------- SegFormer (B2/B5 etc.) ----------------
     if 'segformer' in self.config.model.name:
-      feature_extractor = SegformerFeatureExtractor.from_pretrained("nvidia/segformer-b5-finetuned-cityscapes-1024-1024")
-      segformer = SegformerForSemanticSegmentation.from_pretrained("nvidia/segformer-b5-finetuned-cityscapes-1024-1024").to(self.device)
-      self.model = segformer
+      # map names like segformer_b2 / segformer_b5 → HF IDs
+      name = self.config.model.name
+      hf_id = None
+      if '_b0' in name: hf_id = "nvidia/segformer-b0-finetuned-cityscapes-1024-1024"
+      if '_b1' in name: hf_id = "nvidia/segformer-b1-finetuned-cityscapes-1024-1024"
+      if '_b2' in name: hf_id = "nvidia/segformer-b2-finetuned-cityscapes-1024-1024"
+      if '_b3' in name: hf_id = "nvidia/segformer-b3-finetuned-cityscapes-1024-1024"
+      if '_b4' in name: hf_id = "nvidia/segformer-b4-finetuned-cityscapes-1024-1024"
+      if '_b5' in name or hf_id is None:
+        hf_id = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
+
+      # NOTE: We do not use the FeatureExtractor in forward here; we assume inputs are already resized/normalized by the dataset pipeline.
+      self.segformer_id = hf_id
+      self.model = SegformerForSemanticSegmentation.from_pretrained(hf_id).to(self.device)
       self.model.eval()
 
 
