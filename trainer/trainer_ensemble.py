@@ -165,6 +165,9 @@ class PatchTrainer():
           self.metric.reset()
           if hasattr(self.criterion, "set_epoch"):
               self.criterion.set_epoch(ep)
+              # >>> ADD (right after set_epoch(ep))
+              E1  = int(getattr(self.config.attack, "stage1_epochs", 15))   # epochs for Stage-1
+              tau = float(getattr(self.config.attack, "stage2_agree_thresh", 0.85))  # optional early switch
 
           total_loss = 0.0
           samplecnt = 0
@@ -194,32 +197,42 @@ class PatchTrainer():
                   correct_pixels = (pred_labels == patched_label) & (patched_label != self.config.train.ignore_label)
                   num_correct = int(correct_pixels.sum().item())
 
-              if num_correct > 0:
-                  stage_name = "S1"
-                  sampled_names = ["anchor"]
-                  loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
-              else:
-                  stage_name = "S2-JS"
+              # ---------- decide stage (epoch gate + optional agreement gate) ----------
+              with torch.no_grad():
+                  pred_adv   = output.argmax(dim=1)
+                  pred_clean = clean_output.argmax(dim=1)
+                  valid = (patched_label != self.config.train.ignore_label)
+                  # fraction of valid pixels where adv == clean
+                  agree_frac = ((pred_adv == pred_clean) & valid).float().mean().item()
+              
+              use_stage2 = (ep >= E1) or (agree_frac <= tau)
+              
+              if use_stage2:
+                  stage_name = f"S2-JS(agree={agree_frac:.3f})"
                   per_model_losses = []
-                  sampled_names = ["anchor"]
-
+              
                   # anchor contributes
-                  loss_anchor = self.criterion.compute_loss_transegpgd_stage2_js(output, patched_label, clean_output)
+                  loss_anchor = self.criterion.compute_loss_transegpgd_stage2_js(
+                      output, patched_label, clean_output
+                  )
                   per_model_losses.append(loss_anchor)
-
+                  sampled_names = ["anchor"]
+              
                   # sample K surrogates
                   if len(self.ensemble) > 0 and self.ens_sample_size > 0:
                       models_k = random.sample(self.ensemble, k=min(self.ens_sample_size, len(self.ensemble)))
                   else:
                       models_k = []
-
+              
                   for m in models_k:
                       out_m = m.predict(patched_image, patched_label.shape)
                       with torch.no_grad():
                           clean_m = m.predict(image, patched_label.shape)
-                      per_model_losses.append(self.criterion.compute_loss_transegpgd_stage2_js(out_m, patched_label, clean_m))
+                      per_model_losses.append(
+                          self.criterion.compute_loss_transegpgd_stage2_js(out_m, patched_label, clean_m)
+                      )
                       sampled_names.append(getattr(m.config.model, "name", "unk"))
-
+              
                   # aggregate across models: smooth max if tau>0 else average
                   if len(per_model_losses) == 1:
                       loss = per_model_losses[0]
@@ -229,6 +242,11 @@ class PatchTrainer():
                              - self.ens_tau * torch.log(torch.tensor(len(per_model_losses), device=Ls.device, dtype=Ls.dtype))
                   else:
                       loss = torch.stack(per_model_losses).mean()
+              
+              else:
+                  stage_name = f"S1(agree={agree_frac:.3f})"
+                  sampled_names = ["anchor"]
+                  loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
 
               total_loss += float(loss.item())
 
