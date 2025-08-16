@@ -275,118 +275,133 @@ class PatchTrainer():
 
 
   def train(self):
+    # Expecting 30 total epochs; split 15/15 by epoch index.
+    start_epoch = self.start_epoch
+    end_epoch   = self.end_epoch
+    total_epochs = end_epoch - start_epoch
+    assert total_epochs == 30, f"This schedule expects 30 epochs; got {total_epochs}."
+
+    # Split point (exclusive for Stage-1)
+    switch_epoch = start_epoch + (total_epochs // 2)  # start..switch-1 = Stage-1, switch..end-1 = Stage-2
+
     epochs, iters_per_epoch, max_iters = self.epochs, self.iters_per_epoch, self.max_iters
-    start_epoch=0
-    switch_epoch=(start_epoch+self.end_epoch)//2
-
     start_time = time.time()
-    self.logger.info('Start training, Total Epochs: {:d} = Iterations per epoch {:d}'.format(epochs, iters_per_epoch))
+    self.logger.info(
+        f"Start training | Total Epochs: {total_epochs} "
+        f"(Stage-1: {start_epoch}–{switch_epoch-1}, Stage-2(JS): {switch_epoch}–{end_epoch-1}) | "
+        f"Iterations/epoch: {iters_per_epoch}"
+    )
+
     IoU = []
-    for ep in range(self.start_epoch, self.end_epoch):
-      self.current_epoch = ep
-      self.metric.reset()
-      if hasattr(self.criterion, "set_epoch"):
-        self.criterion.set_epoch(ep)
-      total_loss = 0
-      samplecnt = 0
-      for i_iter, batch in enumerate(self.train_dataloader, 0):
-          self.current_iteration += 1
-          samplecnt += batch[0].shape[0]
-          image, true_label,_, _, _ = batch
-          image, true_label = image.to(self.device), true_label.to(self.device)
-          samplecnt += image.shape[0]
+    for ep in range(start_epoch, end_epoch):
+        self.current_epoch = ep
+        self.metric.reset()
 
-          # ---- get current patch & apply light EOT on patch ----
-          #patch = self.get_patch()                     # (3,S,S) in [0,1]
-          patch = self.eot_transform_patch(self.patch)      # optional EOT on patch itself
+        if hasattr(self.criterion, "set_epoch"):
+            self.criterion.set_epoch(ep)
 
-          # ---- paste patch (your existing function) ----
-          patched_image, patched_label = self.apply_patch(image, true_label, patch) 
-          patched_label = patched_label.to(self.device).long() 
-          
-          # Randomly place patch in image and label(put ignore index)
-          #patched_image, patched_label = self.apply_patch(image,true_label,self.patch)
-          # fig = plt.figure()
-          # ax = fig.add_subplot(1,2,1)
-          # ax.imshow(patched_image[0].permute(1,2,0).cpu().detach().numpy())
-          # ax = fig.add_subplot(1,2,2)
-          # ax.imshow(patched_label[0].cpu().detach().numpy())
-          # plt.show()
+        # Decide stage for the whole epoch
+        use_stage1 = (ep < switch_epoch)
+        stage_name = "Stage-1" if use_stage1 else "Stage-2(JS)"
+        self.logger.info(f"Epoch {ep}: using {stage_name}")
 
-          # Forward pass through the model (and interpolation if needed)
-          output = self.model.predict(patched_image,patched_label.shape)
-          #plt.imshow(output.argmax(dim =1)[0].cpu().detach().numpy())
-          #plt.show()
-          #break
-          with torch.no_grad():
-             clean_output = self.model.predict(image, patched_label.shape)
+        total_loss = 0.0
+        samplecnt = 0
 
-          with torch.no_grad():
-              pred_labels = output.argmax(dim=1)  # (N, H, W)
-              correct_pixels = (pred_labels == patched_label) & (patched_label != self.config.train.ignore_label)
-              num_correct = correct_pixels.sum().item()
-          
-          if num_correct > 0:
-              self.logger.info(f"Batch {i_iter}: {num_correct} correctly predicted pixels remaining.")
-              loss = self.criterion.compute_loss_transegpgd_stage1(output, patched_label, clean_output)
-          else:
-              loss = self.criterion.compute_loss_transegpgd_stage2_js(output, patched_label, clean_output)
-              #loss = self.criterion.compute_loss_transegpgd_stage2(output, patched_label, clean_output)
-              # Compute adaptive loss
-              #loss = self.criterion.compute_loss(output, patched_label)
-              #loss = self.criterion.compute_loss_direct(output, patched_label)
+        for i_iter, batch in enumerate(self.train_dataloader, 0):
+            self.current_iteration += 1
 
-          #loss = self.criterion.compute_loss_transegpgd(output, patched_label, clean_output)
+            # ---- batch prep ----
+            image, true_label, _, _, _ = batch
+            image, true_label = image.to(self.device), true_label.to(self.device)
+            samplecnt += image.shape[0]  # (fixed) count once
 
-          total_loss += loss.item()
-          #break
+            # ---- get current patch & optional EOT on patch ----
+            # ensure patch requires grad for attack update
+            if not self.patch.requires_grad:
+                self.patch.requires_grad_()
+            patch = self.eot_transform_patch(self.patch)
 
-          ## metrics
-          self.metric.update(output, patched_label)
-          pixAcc, mIoU = self.metric.get()
+            # ---- paste patch ----
+            # If available, modify apply_patch to also return patch_mask for metrics (optional)
+            patched_image, patched_label = self.apply_patch(image, true_label, patch)
+            patched_label = patched_label.to(self.device).long()
 
-          # Backpropagation
-          self.model.model.zero_grad()
-          if self.patch.grad is not None:
-            self.patch.grad.zero_()
-          loss.backward()
-          with torch.no_grad():
-              #self.patch += self.epsilon * self.patch.grad.sign()  # Update patch using FGSM-style ascent
-              self.patch += self.epsilon * self.patch.grad.data.sign()
-              self.patch.clamp_(0, 1)  # Keep pixel values in valid range
+            # ---- forward passes ----
+            output = self.model.predict(patched_image, patched_label.shape)
+            with torch.no_grad():
+                clean_output = self.model.predict(image, patched_label.shape)
 
-          ## ETA
-          eta_seconds = ((time.time() - start_time) / self.current_iteration) * (iters_per_epoch*epochs - self.current_iteration)
-          eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+            # ---- compute loss by fixed epoch schedule ----
+            if use_stage1:
+                loss = self.criterion.compute_loss_transegpgd_stage1(
+                    output, patched_label, clean_output
+                )
+            else:
+                loss = self.criterion.compute_loss_transegpgd_stage2_js(
+                    output, patched_label, clean_output
+                )
 
-          if i_iter % self.log_per_iters == 0:
-            self.logger.info(
-              "Epochs: {:d}/{:d} || Samples: {:d}/{:d} || Lr: {:.6f} || Loss: {:.4f} || mIoU: {:.4f} || Cost Time: {} || Estimated Time: {}".format(
-                  self.current_epoch, self.end_epoch,
-                  samplecnt, self.batch_train*iters_per_epoch,
-                  #self.optimizer.param_groups[0]['lr'],
-                  self.epsilon,
-                  loss.item(),
-                  mIoU,
-                  str(datetime.timedelta(seconds=int(time.time() - start_time))),
-                  eta_string))
-          
+            total_loss += loss.item()
 
-      average_pixAcc, average_mIoU = self.metric.get()
-      average_loss = total_loss/len(self.train_dataloader)
-      self.logger.info('-------------------------------------------------------------------------------------------------')
-      self.logger.info("Epochs: {:d}/{:d}, Average loss: {:.3f}, Average mIoU: {:.3f}, Average pixAcc: {:.3f}".format(
-        self.current_epoch, self.epochs, average_loss, average_mIoU, average_pixAcc))
+            # ---- metrics ----
+            self.metric.update(output, patched_label)
+            pixAcc, mIoU = self.metric.get()
 
-      
-      #self.test() ## Doing 1 iteration of testing
-      self.logger.info('-------------------------------------------------------------------------------------------------')
-      #self.model.train() ## Setting the model back to train mode
-      # if self.lr_scheduler:
-      #     self.scheduler.step()
+            # ---- backward: update patch only (FGSM-style ascent) ----
+            # Zero grads on model and patch
+            if hasattr(self.model, "model"):
+                self.model.model.zero_grad()
+            else:
+                # fallback if model is directly the nn.Module
+                self.model.zero_grad()
 
-      IoU.append(self.metric.get(full=True))
+            if self.patch.grad is not None:
+                self.patch.grad.zero_()
 
-    return self.patch.detach(),np.array(IoU)  # Return adversarial patch and IoUs over epochs
+            loss.backward()
 
-    
+            with torch.no_grad():
+                # FGSM ascent step on patch (maximize loss)
+                self.patch += self.epsilon * self.patch.grad.data.sign()
+                self.patch.clamp_(0, 1)
+
+            # ---- ETA/logging ----
+            eta_seconds = ((time.time() - start_time) / max(1, self.current_iteration)) * \
+                          (iters_per_epoch * total_epochs - self.current_iteration)
+            eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+
+            if i_iter % self.log_per_iters == 0:
+                self.logger.info(
+                    "Epoch: {:d}/{:d} || Batch: {:d}/{:d} || Samples: {:d}/{:d} || "
+                    "Epsilon(step): {:.6f} || Loss: {:.4f} || mIoU: {:.4f} || "
+                    "Cost Time: {} || ETA: {}".format(
+                        self.current_epoch, end_epoch,
+                        i_iter + 1, iters_per_epoch,
+                        samplecnt, self.batch_train * iters_per_epoch,
+                        self.epsilon,
+                        loss.item(),
+                        mIoU,
+                        str(datetime.timedelta(seconds=int(time.time() - start_time))),
+                        eta_string
+                    )
+                )
+
+        # ---- epoch summary ----
+        average_pixAcc, average_mIoU = self.metric.get()
+        average_loss = total_loss / max(1, len(self.train_dataloader))
+        self.logger.info('-' * 97)
+        self.logger.info(
+            "Epoch {:d}/{:d} | {} | Avg Loss: {:.4f} | Avg mIoU: {:.4f} | Avg pixAcc: {:.4f}".format(
+                self.current_epoch, end_epoch, stage_name, average_loss, average_mIoU, average_pixAcc
+            )
+        )
+        self.logger.info('-' * 97)
+
+        # If you have validation, call it here (optional)
+        # if hasattr(self, "validate") and callable(self.validate):
+        #     _ = self.validate()
+
+        IoU.append(self.metric.get(full=True))
+
+    return self.patch.detach(), np.array(IoU)  # adversarial patch and IoUs over epochs
