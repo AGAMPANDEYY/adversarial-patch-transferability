@@ -26,7 +26,7 @@ class Models():
       if '_s' in self.config.model.name:
         model = torch.load('/kaggle/input/pidnet_s_cityscapes_test/pytorch/default/1/PIDNet_S_Cityscapes_test.pt',map_location=self.device)
       if '_m' in self.config.model.name:
-        model = torch.load('/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation/pretrained_models/PIDNet/PIDNet_M_Cityscapes_test.pt',map_location=self.device)
+        model = torch.load('/kaggle/input/pidnet_m_cityscapes_test/pytorch/default/1/PIDNet_M_Cityscapes_test.pt',map_location=self.device)
       if '_l' in self.config.model.name:
         model = torch.load('/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation/pretrained_models/PIDNet/PIDNet_L_Cityscapes_test.pt',map_location=self.device)
       
@@ -49,7 +49,7 @@ class Models():
         bisenet = BiSeNetV1(19,aux_mode = 'eval').to(self.device)
         bisenet.load_state_dict(model, strict=False)
       if '_v2' in self.config.model.name:
-        model = torch.load('/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation/pretrained_models/BisNetV2/bisnetv2.pth',map_location=self.device)
+        model = torch.load('/kaggle/input/bisenetv2_cityscapes_test/pytorch/default/1/model_final_v2_city.pth',map_location=self.device)
         bisenet = BiSeNetV2(19,aux_mode = 'eval').to(self.device)
         bisenet.load_state_dict(model, strict=False)
       self.model = bisenet
