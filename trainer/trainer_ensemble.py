@@ -69,7 +69,7 @@ class PatchTrainer():
       self.model.model.eval()
       anchor_name = self.config.model.name
 
-      # Ensemble of frozen surrogates (CNN + ViT)
+      # Ensemble of frozen surrogates (CNN + ViT) Surrogate Model
       self.ensemble = []
       default_names = ['pidnet_s', 'pidnet_m', 'bisenet_v2', 'segformer_b2']
       ens_names = getattr(self.config.attack, 'ensemble_names', default_names)
@@ -78,9 +78,8 @@ class PatchTrainer():
           if name == anchor_name:
               continue  # avoid duplicate; anchor is already included separately
           try:
-              cfg_m = copy.deepcopy(self.config)
-              cfg_m.model.name = name
-              m = Models(cfg_m); m.get()
+              m = Models(self.config, model_name=name)  # <-- override here
+              m.get()
               m.model.eval()
               for p in m.model.parameters():
                   p.requires_grad_(False)
