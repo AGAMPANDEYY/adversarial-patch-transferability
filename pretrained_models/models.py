@@ -15,9 +15,9 @@ import torch.nn.functional as F
 sys.path = original_sys_path
 
 class Models():
-  def __init__(self,config):
+  def __init__(self,config, model_name: str=None):
     self.config = config
-    self.name = config.model.name
+    self.name = model_name if model_name is not None else config.model.name
     self.device = config.experiment.device
     self.model = None
 
