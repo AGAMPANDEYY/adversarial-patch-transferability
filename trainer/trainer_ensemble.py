@@ -205,7 +205,7 @@ class PatchTrainer():
                   # fraction of valid pixels where adv == clean
                   agree_frac = ((pred_adv == pred_clean) & valid).float().mean().item()
               
-              use_stage2 = (ep >= E1) or (agree_frac <= tau)
+              use_stage2 = (ep >= E1) #or (agree_frac <= tau)
               
               if use_stage2:
                   stage_name = f"S2-JS(agree={agree_frac:.3f})"
