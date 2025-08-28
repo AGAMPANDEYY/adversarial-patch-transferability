@@ -109,3 +109,4 @@ attack:
 
   # (optional) EOT curriculum flag
   use_hard_eot:  True      # if True, you can detect epoch ≥ stage1_epochs and switch to stronger EOT
+  use_segpgd: True 
