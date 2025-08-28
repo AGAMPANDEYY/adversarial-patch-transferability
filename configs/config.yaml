@@ -109,4 +109,6 @@ attack:
 
   # (optional) EOT curriculum flag
   use_hard_eot:  True      # if True, you can detect epoch ≥ stage1_epochs and switch to stronger EOT
-  use_segpgd: True 
+  use_segpgd: true        # turn SegPGD mode on/off
+  segpgd_steps: 3         # T: inner attack steps per batch (start with 2–3)
+  segpgd_alpha: 0.005     # α: per-step step size for the patch update (use your epsilon if you like)
