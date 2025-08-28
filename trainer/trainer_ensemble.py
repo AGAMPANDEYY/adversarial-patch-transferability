@@ -71,7 +71,7 @@ class PatchTrainer():
 
       # Ensemble of frozen surrogates (CNN + ViT) Surrogate Model
       self.ensemble = []
-      default_names = ['pidnet_s', 'pidnet_m', 'bisenet_v2', 'segformer_b2']
+      default_names = ['pidnet_s', 'pidnet_m', 'bisenet_v2', 'segformer']
       ens_names = getattr(self.config.attack, 'ensemble_names', default_names)
 
       for name in ens_names:
