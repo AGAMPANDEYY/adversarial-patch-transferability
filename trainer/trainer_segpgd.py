@@ -330,160 +330,160 @@ class PatchTrainer():
 
 
 
-    def train(self):
-        # ----- epoch split (use config first; else fall back to an even split) -----
-        start_epoch = int(self.start_epoch)
-        end_epoch   = int(self.end_epoch)
-        total_epochs = end_epoch - start_epoch
-    
-        E1_cfg = int(getattr(self.config.attack, "stage1_epochs", max(1, total_epochs // 2)))
-        E2_cfg = int(getattr(self.config.attack, "stage2_epochs", total_epochs - E1_cfg))
-        if E1_cfg + E2_cfg != total_epochs:
-            # fallback to even split if the config doesn't add up
-            E1_cfg = total_epochs // 2
-            E2_cfg = total_epochs - E1_cfg
-        switch_epoch = start_epoch + E1_cfg  # [start, switch) = Stage-1 ; [switch, end) = Stage-2
-    
-        iters_per_epoch = self.iters_per_epoch
-        start_time = time.time()
-    
-        self.logger.info(
-            f"Start training | Total={total_epochs} "
-            f"(Stage-1: {start_epoch}–{switch_epoch-1} | Stage-2(JS): {switch_epoch}–{end_epoch-1}) | "
-            f"iters/epoch={iters_per_epoch}"
-        )
-    
-        use_segpgd = bool(getattr(self.config.attack, 'use_segpgd', False))
-        seg_T      = int(getattr(self.config.attack, 'segpgd_steps', 3))
-        seg_alpha  = float(getattr(self.config.attack, 'segpgd_alpha', self.epsilon))
-    
-        IoU = []
-        for ep in range(start_epoch, end_epoch):
-            self.current_epoch = ep
-            self.metric.reset()
-            if hasattr(self.criterion, "set_epoch"):
-                self.criterion.set_epoch(ep)
-    
-            # epoch-wide stage choice (if not using SegPGD)
-            use_stage1 = (ep < switch_epoch)
-            stage_epoch_name = "Stage-1" if use_stage1 else "Stage-2(JS)"
-            if not use_segpgd:
-                self.logger.info(f"Epoch {ep}: using {stage_epoch_name}")
-            else:
-                self.logger.info(f"Epoch {ep}: using SegPGD[T={seg_T}, α={seg_alpha}]")
-    
-            total_loss = 0.0
-            samplecnt = 0
-    
-            for i_iter, batch in enumerate(self.train_dataloader, 0):
-                self.current_iteration += 1
-    
-                # ---- batch prep ----
-                image, true_label, _, _, _ = batch
-                image = image.to(self.device)
-                true_label = true_label.to(self.device)
-                samplecnt += image.shape[0]
-    
-                # make sure patch has grad for updates
-                if not self.patch.requires_grad:
-                    self.patch.requires_grad_(True)
-    
-                # ------------------- SegPGD mode -------------------
-                if use_segpgd:
-                    # inner loop handles: paste, forward, loss, and patch FGSM steps
-                    output, patched_label, loss_val = self._segpgd_inner(
-                        image, true_label, T=seg_T, alpha=seg_alpha
-                    )
-                    loss = torch.tensor(loss_val, device=self.device)  # for uniform logging
-                    did_patch_update = True
-    
-                # ------------------- Stage-1 / Stage-2(JS) mode -------------------
-                else:
-                    # (optional) light EOT on the patch for physical robustness
-                    patch_to_paste = self.eot_transform_patch(self.patch)
-    
-                    # paste & dtype
-                    patched_image, patched_label = self.apply_patch(image, true_label, patch_to_paste)
-                    patched_label = patched_label.to(self.device).long()
-    
-                    # forward anchor
-                    output = self.model.predict(patched_image, patched_label.shape)
-                    with torch.no_grad():
-                        clean_output = self.model.predict(image, patched_label.shape)
-    
-                    # compute epoch-stage loss
-                    if use_stage1:
-                        loss = self.criterion.compute_loss_transegpgd_stage1(
-                            output, patched_label, clean_output
-                        )
-                    else:
-                        loss = self.criterion.compute_loss_transegpgd_stage2_js(
-                            output, patched_label, clean_output
-                        )
-    
-                    did_patch_update = False  # outer update will run below
-    
-                # accumulate for epoch log
-                total_loss += float(loss.item())
-    
-                # metrics from anchor
-                self.metric.update(output, patched_label)
-                pixAcc, mIoU = self.metric.get()
-    
-                # ---- outer patch update (only when NOT using SegPGD) ----
-                if not use_segpgd:
-                    if hasattr(self.model, "model"):
-                        self.model.model.zero_grad(set_to_none=True)
-                    else:
-                        self.model.zero_grad(set_to_none=True)
-                    if self.patch.grad is not None:
-                        self.patch.grad.zero_()
-    
-                    loss.backward()
-                    with torch.no_grad():
-                        # FGSM ascent
-                        self.patch += self.epsilon * self.patch.grad.sign()
-                        self.patch.clamp_(0, 1)
-    
-                # ---- logging ----
-                if i_iter % self.log_per_iters == 0:
-                    elapsed = int(time.time() - start_time)
-                    eta = int((elapsed / max(self.current_iteration, 1)) *
-                              (iters_per_epoch * total_epochs - self.current_iteration))
-                    stage_tag = (
-                        f"SegPGD[T={seg_T}]"
-                        if use_segpgd else
-                        stage_epoch_name
-                    )
-                    self.logger.info(
-                        "Epoch: {:d}/{:d} || Stage:{} || Batch: {:d}/{:d} || "
-                        "Samples: {:d}/{:d} || Step(ε): {:.6f} || Loss: {:.4f} || "
-                        "mIoU: {:.4f} || Time: {} || ETA: {}".format(
-                            self.current_epoch, end_epoch,
-                            stage_tag, i_iter + 1, iters_per_epoch,
-                            samplecnt, self.batch_train * iters_per_epoch,
-                            self.epsilon, loss.item(), mIoU,
-                            str(datetime.timedelta(seconds=elapsed)),
-                            str(datetime.timedelta(seconds=eta))
-                        )
-                    )
-    
-            # ---- epoch summary ----
-            avg_pixAcc, avg_mIoU = self.metric.get()
-            avg_loss = total_loss / max(1, len(self.train_dataloader))
-            self.logger.info('-' * 97)
-            self.logger.info(
-                "Epoch {:d}/{:d} | {} | Avg Loss: {:.4f} | Avg mIoU: {:.4f} | Avg pixAcc: {:.4f}".format(
-                    self.current_epoch, end_epoch,
-                    ("SegPGD" if use_segpgd else stage_epoch_name),
-                    avg_loss, avg_mIoU, avg_pixAcc
-                )
-            )
-            if hasattr(self.criterion, "log_epoch_summary"):
-                self.criterion.log_epoch_summary()
-            self.logger.info('-' * 97)
-    
-            IoU.append(self.metric.get(full=True))
-    
-        # return trained patch + IoU history
-        return self.patch.detach(), np.array(IoU)
+  def train(self):
+      # ----- epoch split (use config first; else fall back to an even split) -----
+      start_epoch = int(self.start_epoch)
+      end_epoch   = int(self.end_epoch)
+      total_epochs = end_epoch - start_epoch
+  
+      E1_cfg = int(getattr(self.config.attack, "stage1_epochs", max(1, total_epochs // 2)))
+      E2_cfg = int(getattr(self.config.attack, "stage2_epochs", total_epochs - E1_cfg))
+      if E1_cfg + E2_cfg != total_epochs:
+          # fallback to even split if the config doesn't add up
+          E1_cfg = total_epochs // 2
+          E2_cfg = total_epochs - E1_cfg
+      switch_epoch = start_epoch + E1_cfg  # [start, switch) = Stage-1 ; [switch, end) = Stage-2
+  
+      iters_per_epoch = self.iters_per_epoch
+      start_time = time.time()
+  
+      self.logger.info(
+          f"Start training | Total={total_epochs} "
+          f"(Stage-1: {start_epoch}–{switch_epoch-1} | Stage-2(JS): {switch_epoch}–{end_epoch-1}) | "
+          f"iters/epoch={iters_per_epoch}"
+      )
+  
+      use_segpgd = bool(getattr(self.config.attack, 'use_segpgd', False))
+      seg_T      = int(getattr(self.config.attack, 'segpgd_steps', 3))
+      seg_alpha  = float(getattr(self.config.attack, 'segpgd_alpha', self.epsilon))
+  
+      IoU = []
+      for ep in range(start_epoch, end_epoch):
+          self.current_epoch = ep
+          self.metric.reset()
+          if hasattr(self.criterion, "set_epoch"):
+              self.criterion.set_epoch(ep)
+  
+          # epoch-wide stage choice (if not using SegPGD)
+          use_stage1 = (ep < switch_epoch)
+          stage_epoch_name = "Stage-1" if use_stage1 else "Stage-2(JS)"
+          if not use_segpgd:
+              self.logger.info(f"Epoch {ep}: using {stage_epoch_name}")
+          else:
+              self.logger.info(f"Epoch {ep}: using SegPGD[T={seg_T}, α={seg_alpha}]")
+  
+          total_loss = 0.0
+          samplecnt = 0
+  
+          for i_iter, batch in enumerate(self.train_dataloader, 0):
+              self.current_iteration += 1
+  
+              # ---- batch prep ----
+              image, true_label, _, _, _ = batch
+              image = image.to(self.device)
+              true_label = true_label.to(self.device)
+              samplecnt += image.shape[0]
+  
+              # make sure patch has grad for updates
+              if not self.patch.requires_grad:
+                  self.patch.requires_grad_(True)
+  
+              # ------------------- SegPGD mode -------------------
+              if use_segpgd:
+                  # inner loop handles: paste, forward, loss, and patch FGSM steps
+                  output, patched_label, loss_val = self._segpgd_inner(
+                      image, true_label, T=seg_T, alpha=seg_alpha
+                  )
+                  loss = torch.tensor(loss_val, device=self.device)  # for uniform logging
+                  did_patch_update = True
+  
+              # ------------------- Stage-1 / Stage-2(JS) mode -------------------
+              else:
+                  # (optional) light EOT on the patch for physical robustness
+                  patch_to_paste = self.eot_transform_patch(self.patch)
+  
+                  # paste & dtype
+                  patched_image, patched_label = self.apply_patch(image, true_label, patch_to_paste)
+                  patched_label = patched_label.to(self.device).long()
+  
+                  # forward anchor
+                  output = self.model.predict(patched_image, patched_label.shape)
+                  with torch.no_grad():
+                      clean_output = self.model.predict(image, patched_label.shape)
+  
+                  # compute epoch-stage loss
+                  if use_stage1:
+                      loss = self.criterion.compute_loss_transegpgd_stage1(
+                          output, patched_label, clean_output
+                      )
+                  else:
+                      loss = self.criterion.compute_loss_transegpgd_stage2_js(
+                          output, patched_label, clean_output
+                      )
+  
+                  did_patch_update = False  # outer update will run below
+  
+              # accumulate for epoch log
+              total_loss += float(loss.item())
+  
+              # metrics from anchor
+              self.metric.update(output, patched_label)
+              pixAcc, mIoU = self.metric.get()
+  
+              # ---- outer patch update (only when NOT using SegPGD) ----
+              if not use_segpgd:
+                  if hasattr(self.model, "model"):
+                      self.model.model.zero_grad(set_to_none=True)
+                  else:
+                      self.model.zero_grad(set_to_none=True)
+                  if self.patch.grad is not None:
+                      self.patch.grad.zero_()
+  
+                  loss.backward()
+                  with torch.no_grad():
+                      # FGSM ascent
+                      self.patch += self.epsilon * self.patch.grad.sign()
+                      self.patch.clamp_(0, 1)
+  
+              # ---- logging ----
+              if i_iter % self.log_per_iters == 0:
+                  elapsed = int(time.time() - start_time)
+                  eta = int((elapsed / max(self.current_iteration, 1)) *
+                            (iters_per_epoch * total_epochs - self.current_iteration))
+                  stage_tag = (
+                      f"SegPGD[T={seg_T}]"
+                      if use_segpgd else
+                      stage_epoch_name
+                  )
+                  self.logger.info(
+                      "Epoch: {:d}/{:d} || Stage:{} || Batch: {:d}/{:d} || "
+                      "Samples: {:d}/{:d} || Step(ε): {:.6f} || Loss: {:.4f} || "
+                      "mIoU: {:.4f} || Time: {} || ETA: {}".format(
+                          self.current_epoch, end_epoch,
+                          stage_tag, i_iter + 1, iters_per_epoch,
+                          samplecnt, self.batch_train * iters_per_epoch,
+                          self.epsilon, loss.item(), mIoU,
+                          str(datetime.timedelta(seconds=elapsed)),
+                          str(datetime.timedelta(seconds=eta))
+                      )
+                  )
+  
+          # ---- epoch summary ----
+          avg_pixAcc, avg_mIoU = self.metric.get()
+          avg_loss = total_loss / max(1, len(self.train_dataloader))
+          self.logger.info('-' * 97)
+          self.logger.info(
+              "Epoch {:d}/{:d} | {} | Avg Loss: {:.4f} | Avg mIoU: {:.4f} | Avg pixAcc: {:.4f}".format(
+                  self.current_epoch, end_epoch,
+                  ("SegPGD" if use_segpgd else stage_epoch_name),
+                  avg_loss, avg_mIoU, avg_pixAcc
+              )
+          )
+          if hasattr(self.criterion, "log_epoch_summary"):
+              self.criterion.log_epoch_summary()
+          self.logger.info('-' * 97)
+  
+          IoU.append(self.metric.get(full=True))
+  
+      # return trained patch + IoU history
+      return self.patch.detach(), np.array(IoU)
