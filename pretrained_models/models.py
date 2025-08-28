@@ -28,7 +28,7 @@ class Models():
       if '_m' in self.config.model.name:
         model = torch.load('/kaggle/input/pidnet_m_cityscapes_test/pytorch/default/1/PIDNet_M_Cityscapes_test.pt',map_location=self.device)
       if '_l' in self.config.model.name:
-        model = torch.load('/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation/pretrained_models/PIDNet/PIDNet_L_Cityscapes_test.pt',map_location=self.device)
+        model = torch.load('/kaggle/input/pidnet-l-weights/PIDNet_L_Cityscapes_test.pt',map_location=self.device)
       
   
       pidnet = get_pred_model(name = self.config.model.name, num_classes = 19).to(self.device)
@@ -45,11 +45,11 @@ class Models():
 
     if 'bisenet' in self.config.model.name:
       if '_v1' in self.config.model.name:
-        model = torch.load('/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation/pretrained_models/BisNetV1/bisnetv1.pth',map_location=self.device)
+        model = torch.load('/kaggle/input/bisenetv1/bisenetv1.pth',map_location=self.device)
         bisenet = BiSeNetV1(19,aux_mode = 'eval').to(self.device)
         bisenet.load_state_dict(model, strict=False)
       if '_v2' in self.config.model.name:
-        model = torch.load('/kaggle/input/bisenetv2_cityscapes_test/pytorch/default/1/model_final_v2_city.pth',map_location=self.device)
+        model = torch.load('/kaggle/input/bisenetv2-weights/bisenetv2.pth',map_location=self.device)
         bisenet = BiSeNetV2(19,aux_mode = 'eval').to(self.device)
         bisenet.load_state_dict(model, strict=False)
       self.model = bisenet
@@ -57,15 +57,15 @@ class Models():
 
 
     if 'icnet' in self.config.model.name:
-      model = torch.load('/content/drive/MyDrive/Colab Notebooks/1_Papers/3_Attack_generation/pretrained_models/ICNet/Copy of resnet50_2024-12-22 08:52:50 EST-0500_176_0.661.pth.tar',map_location=self.device)
+      model = torch.load('/kaggle/input/icnet-wts/icnet_resnet50os8_cityscapes.pth',map_location=self.device)
       icnet = ICNet(nclass = 19).to(self.device)
       icnet.load_state_dict(model['model_state_dict'])
       self.model = icnet
       self.model.eval()
 
     if 'segformer' in self.config.model.name:
-      feature_extractor = SegformerFeatureExtractor.from_pretrained("nvidia/segformer-b5-finetuned-cityscapes-1024-1024")
-      segformer = SegformerForSemanticSegmentation.from_pretrained("nvidia/segformer-b5-finetuned-cityscapes-1024-1024").to(self.device)
+      feature_extractor = SegformerFeatureExtractor.from_pretrained("/kaggle/input/segformer-weights/segformer.b0.1024x1024.city.160k.pth")
+      segformer = SegformerForSemanticSegmentation.from_pretrained("/kaggle/input/segformer-weights/segformer.b0.1024x1024.city.160k.pth").to(self.device)
       self.model = segformer
       self.model.eval()
 
