@@ -391,6 +391,10 @@ class PatchTrainer():
                 self.patch.requires_grad_()
             patch = self.eot_transform_patch(self.patch)
 
+            # ---- ALWAYS compute clean logits BEFORE sidewalk placement ----
+            with torch.no_grad():
+                clean_output = self.model.predict(image, true_label.shape)  # (N,C,H,W)
+
             # ---- paste patch ----
             # ---- sidewalk-aware placement ----
             if self.place_on_sidewalk:
