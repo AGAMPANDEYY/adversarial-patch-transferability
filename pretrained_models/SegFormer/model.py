@@ -1,8 +1,5 @@
 ## Segformer
 import torch
-from mmengine.runner import load_checkpoint
-from mmseg.registry import MODELS
-
 # Build a minimal SegFormer-B0 (Cityscapes) config directly in code
 def build_segformer_b0_mmseg(num_classes=19):
     norm_cfg = dict(type='SyncBN', requires_grad=True)
