@@ -1,81 +1,53 @@
 # pretrained_models/SegFormer/model.py
-# Loader + builder that work with local .pth checkpoints (mmseg-style)
+# Local loader that tries to align an mmseg-style checkpoint with the minimal class above.
 
 import torch
-import torch.nn as nn
-from .arch import SegFormer
+from collections import OrderedDict
+from .segformer_b0 import SegFormer_B0
 
-def build_segformer_from_name(name: str, num_classes: int) -> nn.Module:
-    """
-    name: 'segformer_b0' | 'segformer_b2' | 'b0' | 'b2' | 'mit_b0' ...
-    """
-    name = name.lower()
-    if "b0" in name:
-        variant = "b0"
-    elif "b1" in name:
-        variant = "b1"
-    elif "b2" in name:
-        variant = "b2"
-    elif "b3" in name:
-        variant = "b3"
-    elif "b4" in name:
-        variant = "b4"
-    elif "b5" in name:
-        variant = "b5"
-    else:
-        raise ValueError(f"Unknown segformer variant in '{name}'")
-    return SegFormer(variant=variant, num_classes=num_classes)
+def _strip_prefix_if_present(state_dict, prefix):
+    return { (k[len(prefix):] if k.startswith(prefix) else k): v for k, v in state_dict.items() }
 
-def _strip_prefix(sd, prefix):
-    if all(k.startswith(prefix) for k in sd.keys()):
-        return {k[len(prefix):]: v for k, v in sd.items()}
-    return sd
+def load_segformer_local(ckpt_path: str, device, num_classes=19):
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state = ckpt.get("state_dict", ckpt)  # mmseg often stores under "state_dict"
 
-def load_segformer_local(variant_or_name: str, ckpt_path: str, device, num_classes: int,
-                         strict: bool = False, verbose: bool = True) -> nn.Module:
-    """
-    Build a SegFormer and load a LOCAL .pth checkpoint (like mmseg's).
-    This tries to be compatible with mmseg naming:
-      - expects keys under 'backbone.*' and 'decode_head.*' etc.
-    """
-    model = build_segformer_from_name(variant_or_name, num_classes).to(device)
-    ckpt = torch.load(ckpt_path, map_location=device)
-    sd = ckpt.get('state_dict', ckpt)
+    # mmseg usually prefixes with "backbone." and "decode_head."
+    # our class uses the same names, so we mostly keep them.
+    # sometimes keys are nested or have unused aux heads -> ignore by strict=False.
+    model = SegFormer_B0(num_classes=num_classes).to(device)
 
-    # common wrappers to remove
-    for p in ('module.', 'model.'):
-        sd = _strip_prefix(sd, p)
+    # OPTIONAL: small key mapping examples (expand if your checkpoint uses different naming)
+    remap = OrderedDict()
+    for k, v in state.items():
+        nk = k
+        # example: some checkpoints use "decode_head.linear_c1" etc. Our proj names differ slightly:
+        nk = nk.replace("decode_head.linear_c1", "decode_head.proj_c1.0")
+        nk = nk.replace("decode_head.linear_c2", "decode_head.proj_c2.0")
+        nk = nk.replace("decode_head.linear_c3", "decode_head.proj_c3.0")
+        nk = nk.replace("decode_head.linear_c4", "decode_head.proj_c4.0")
+        nk = nk.replace("decode_head.linear_fuse", "decode_head.fuse.0")
+        nk = nk.replace("decode_head.conv_seg", "decode_head.cls")
+        # some checkpoints use "norm" vs "bn" in head (we used BN). Those layers won’t match — harmless.
+        remap[nk] = v
 
-    if strict:
-        model.load_state_dict(sd, strict=True)
-        if verbose:
-            print("[SegFormer] strict=True load complete.")
-        return model
-
-    # safe-load: keep only matching keys & shapes
-    msd = model.state_dict()
-    inter = {k: v for k, v in sd.items() if k in msd and v.shape == msd[k].shape}
-    missing = [k for k in msd.keys() if k not in inter]
-    unexpected = [k for k in sd.keys() if k not in msd]
-
-    if verbose:
-        print(f"[SegFormer] matched {len(inter)}/{len(msd)} keys | "
-              f"missing {len(missing)} | unexpected {len(unexpected)}")
-
-    model.load_state_dict(inter, strict=False)
+    msg = model.load_state_dict(remap, strict=False)
+    missing = list(msg.missing_keys)
+    unexpected = list(msg.unexpected_keys)
+    print(f"[SegFormer] matched {len(remap)-len(unexpected)}/{len(remap)} keys | "
+          f"missing {len(missing)} | unexpected {len(unexpected)}")
+    if missing:
+        print("  missing:", missing[:8], "..." if len(missing) > 8 else "")
+    if unexpected:
+        print("  unexpected:", unexpected[:8], "..." if len(unexpected) > 8 else "")
     model.eval()
     return model
 
 @torch.no_grad()
-def segformer_logits(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+def segformer_logits(model, image_bchw):
     """
-    Unified forward → logits tensor [B, C, H/4, W/4].
+    image_bchw: [B,3,H,W], normalized like your other models.
+    Returns logits at 1/4 resolution (SegFormer head output). Up-sample yourself if needed.
     """
-    out = model(x)
-    if isinstance(out, torch.Tensor):
-        return out
-    if isinstance(out, (list, tuple)):
-        return out[0]
-    if isinstance(out, dict):
-        return out.get('logits', next(iter(out.values())))
-    raise TypeError(f"Unexpected SegFormer output type: {type(out)}")
+    return model(image_bchw)
+
