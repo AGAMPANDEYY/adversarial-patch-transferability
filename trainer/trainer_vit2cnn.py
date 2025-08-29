@@ -1,7 +1,7 @@
 import sys, time, datetime, random
 from typing import List, Tuple
 
-# Keep your repo on sys.path for dataset/metrics/patch utils
+
 original_sys_path = sys.path.copy()
 sys.path.append("/kaggle/working/adversarial-patch-transferability/")
 
@@ -12,8 +12,8 @@ import numpy as np
 
 from dataset.cityscapes import Cityscapes
 from metrics.performance import SegmentationMetric
-from metrics.loss import PatchLoss           # uses your Stage-1 / Stage-2 logic
-from patch.create import Patch               # for apply_patch
+from metrics.loss import PatchLoss          
+from patch.create import Patch               
 from torch.optim.lr_scheduler import ExponentialLR
 
 # Hugging Face SegFormer (ViT-backbone)
@@ -95,7 +95,7 @@ class PatchTrainerAttentionHijack:
         hf_cfg = AutoConfig.from_pretrained(
             hf_name,
             num_labels=config.dataset.num_classes,
-            output_attentions=True,            # << crucial for attention hijack
+            output_attentions=True,            # attention hijack
             output_hidden_states=False,
         )
         self.model = SegformerForSemanticSegmentation.from_pretrained(hf_name, config=hf_cfg)
@@ -137,7 +137,7 @@ class PatchTrainerAttentionHijack:
         self.metric = SegmentationMetric(config)
         self.log_every = config.train.log_per_iters
 
-        # Patch applier (uses your geometric constraints)
+        # Patch applier
         self.apply_patch = Patch(config).apply_patch
 
     # ---------------------
