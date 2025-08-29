@@ -276,32 +276,32 @@ class SegFormerHead(nn.Module):
         c1, c2, c3, c4 = in_channels
         embed = channels
 
-        self.linear_c1 = nn.Sequential() ; self.linear_c1.proj = MLP_Linear(c1, embed)
-        self.linear_c2 = nn.Sequential() ; self.linear_c2.proj = MLP_Linear(c2, embed)
-        self.linear_c3 = nn.Sequential() ; self.linear_c3.proj = MLP_Linear(c3, embed)
-        self.linear_c4 = nn.Sequential() ; self.linear_c4.proj = MLP_Linear(c4, embed)
+        self.linear_c1 = MLP_Linear(c1, embed)  # Direct MLP_Linear, no nn.Sequential
+        self.linear_c2 = MLP_Linear(c2, embed)
+        self.linear_c3 = MLP_Linear(c3, embed)
+        self.linear_c4 = MLP_Linear(c4, embed)
 
         self.linear_fuse = nn.Conv2d(embed*4, embed, kernel_size=1, bias=False)
         self.bn = nn.BatchNorm2d(embed)
         self.act = nn.ReLU(inplace=True)
         self.dropout = nn.Dropout2d(0.1)
-        self.conv_seg = nn.Conv2d(embed, num_classes, kernel_size=1)
+        self.linear_pred = nn.Conv2d(embed, num_classes, kernel_size=1)  # Rename conv_seg to linear_pred
 
     def forward(self, feats):
-        c1, c2, c3, c4 = feats  # [B, C*, H/4, W/4] ... [B, C4, H/32, W/32]
-        n, _, H4, W4 = c1.shape  # target 1/4 grid
+        c1, c2, c3, c4 = feats
+        n, _, H4, W4 = c1.shape
 
-        _c1 = self.linear_c1.proj(c1)
-        _c2 = F.interpolate(self.linear_c2.proj(c2), size=(H4, W4), mode='bilinear', align_corners=False)
-        _c3 = F.interpolate(self.linear_c3.proj(c3), size=(H4, W4), mode='bilinear', align_corners=False)
-        _c4 = F.interpolate(self.linear_c4.proj(c4), size=(H4, W4), mode='bilinear', align_corners=False)
+        _c1 = self.linear_c1(c1)
+        _c2 = F.interpolate(self.linear_c2(c2), size=(H4, W4), mode='bilinear', align_corners=False)
+        _c3 = F.interpolate(self.linear_c3(c3), size=(H4, W4), mode='bilinear', align_corners=False)
+        _c4 = F.interpolate(self.linear_c4(c4), size=(H4, W4), mode='bilinear', align_corners=False)
 
         x = torch.cat([_c1, _c2, _c3, _c4], dim=1)
         x = self.linear_fuse(x)
         x = self.bn(x)
         x = self.act(x)
         x = self.dropout(x)
-        x = self.conv_seg(x)  # [B, num_classes, H/4, W/4]
+        x = self.linear_pred(x)  # Use linear_pred instead of conv_seg
         return x
 
 # ----------------------
