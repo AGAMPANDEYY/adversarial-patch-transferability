@@ -1,7 +1,7 @@
 # pretrained_models/SegFormer/model.py
 import torch
 from collections import OrderedDict
-from .segformer_b0 import SegFormer_B0  # the minimal PyTorch class we defined
+from .arch import SegFormer_B0  # the minimal PyTorch class we defined
 
 def load_segformer_local(
     variant_or_name: str,
