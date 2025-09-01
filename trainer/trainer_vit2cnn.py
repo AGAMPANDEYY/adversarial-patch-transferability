@@ -24,7 +24,7 @@ from transformers import AutoConfig, SegformerForSemanticSegmentation
 sys.path = original_sys_path
 
 
-class PatchTrainerAttentionHijack:
+class PatchTrainer:
     """
     ViT-target patch training with:
       - Attention Hijack (ViT)
