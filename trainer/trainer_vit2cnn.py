@@ -188,83 +188,90 @@ class PatchTrainer:
         diff = (patched_img - clean_img).abs().sum(dim=1, keepdim=True)  # (B,1,H,W)
         return (diff > thresh).float()
 
-    def attn_hijack_loss(self, attentions: Tuple[torch.Tensor, ...],
-                     patch_mask: torch.Tensor, H: int, W: int) -> torch.Tensor:
-                """
-                Robust version: skips incompatible attention blocks; maps to token grids
-                using stride heuristics and falls back to sqrt(N) if needed.
-                """
-                device = self.device
-                if (attentions is None) or (len(attentions) == 0):
-                    return torch.zeros((), device=device)
-            
-                B = patch_mask.size(0)
-                strides = [4, 8, 16, 32]  # common MiT stages
-                hijack_sum, used = 0.0, 0
-            
-                for idx, att in enumerate(attentions):
-                    # Some entries can be None or not 4D (skip safely)
-                    if att is None or not torch.is_tensor(att) or att.ndim != 4:
+    def saliency_hijack_loss(self, logits_adv, patched_image, patch_mask) -> torch.Tensor:
+            """
+            Fallback when attentions are unusable:
+            Maximize gradient magnitude inside the patch vs outside.
+            """
+            # we’ll use entropy of the softmax as a generic objective to derive saliency
+            probs = torch.softmax(logits_adv, dim=1)
+            entropy = -(probs * (probs.clamp_min(1e-8)).log()).sum(dim=1).mean()  # scalar
+        
+            # need gradients of entropy w.r.t. the input image
+            # ensure graph exists through patched_image
+            if not patched_image.requires_grad:
+                patched_image.requires_grad_(True)
+        
+            grad = torch.autograd.grad(
+                entropy, patched_image, create_graph=True, retain_graph=True, allow_unused=False
+            )[0]  # (B,3,H,W)
+        
+            gmag = grad.abs().mean(dim=1, keepdim=True)  # (B,1,H,W)
+        
+            # maximize inside-patch saliency, minimize outside-patch
+            inside = (gmag * patch_mask).mean()
+            outside = (gmag * (1.0 - patch_mask)).mean()
+            # Negative of contrast → minimizing total increases (inside - outside)
+            return -(inside - outside)
+
+
+    def attn_hijack_loss(self, attentions, patch_mask, H: int, W: int) -> torch.Tensor:
+            """
+            Robust attention hijack: try to maximize attention mass to patch tokens.
+            If no compatible attention blocks exist, returns a scalar 0 tensor.
+            (We'll add a saliency fallback at the call site.)
+            """
+            device = self.device
+            if (attentions is None) or (len(attentions) == 0):
+                return torch.zeros((), device=device)
+        
+            B = patch_mask.size(0)
+            strides = [4, 8, 16, 32]  # common MiT stages
+            hijack_sum, used = 0.0, 0
+        
+            for att in attentions:
+                if att is None or not torch.is_tensor(att) or att.ndim != 4:
+                    continue
+                B_a, n_heads, Nq, Nk = att.shape
+                # must be batch-aligned and square self-attention
+                if (B_a != B) or (Nq != Nk) or (Nq <= 0):
+                    continue
+        
+                # find token grid that matches this N
+                stride = None
+                for s in strides:
+                    if (H // s) * (W // s) == Nq:
+                        stride = s
+                        break
+                if stride is None:
+                    # fallback: try square root grid
+                    root = int(round(Nq ** 0.5))
+                    if root * root != Nq:
                         continue
-            
-                    B_a, n_heads, Nq, Nk = att.shape
-            
-                    # Must be batch-aligned and square (self-attention)
-                    if (B_a != B) or (Nq != Nk) or (Nq <= 0):
-                        # Skip silently; HF can return variant blocks depending on config
+                    h_s = w_s = root
+                else:
+                    h_s, w_s = H // stride, W // stride
+        
+                pmask = F.interpolate(patch_mask, size=(h_s, w_s), mode="nearest").view(B, -1)  # (B, N)
+                att_mean = att.mean(dim=1)  # (B, N, N)
+        
+                batch_loss, valid = 0.0, 0
+                for b in range(B):
+                    cols = pmask[b] > 0.5
+                    if cols.sum() == 0:
                         continue
-            
-                    # Try to map Nq to an (h_s, w_s) grid via known strides first
-                    stride = None
-                    for s in strides:
-                        if (H // s) * (W // s) == Nq:
-                            stride = s
-                            h_s, w_s = H // s, W // s
-                            break
-            
-                    if stride is None:
-                        # Fallback: approximate grid from aspect ratio and Nq
-                        # Aim for h_s ~ H/W * sqrt(Nq), w_s ~ sqrt(Nq)
-                        root = int(round(Nq ** 0.5))
-                        if root * root == Nq:
-                            h_s, w_s = root, root
-                        else:
-                            # keep aspect ratio roughly consistent
-                            ratio = H / max(1.0, float(W))
-                            w_s = max(1, int(round(root)))
-                            h_s = max(1, int(round(ratio * w_s)))
-                            # final correction if product off: adjust w_s
-                            if h_s * w_s != Nq:
-                                if h_s > 0:
-                                    w_s = max(1, Nq // h_s)
-                            # still mismatched? skip
-                            if h_s * w_s != Nq:
-                                continue
-            
-                    # Downsample patch mask to token grid
-                    pmask = F.interpolate(patch_mask, size=(h_s, w_s), mode="nearest").view(B, -1)  # (B, N)
-            
-                    # Average over heads
-                    att_mean = att.mean(dim=1)  # (B, N, N)
-            
-                    # Accumulate negative mean attention to patch tokens (maximize mass to patch)
-                    batch_loss, valid = 0.0, 0
-                    for b in range(B):
-                        idx_cols = pmask[b] > 0.5
-                        if idx_cols.sum() == 0:
-                            continue
-                        # attention of all queries TO patch columns
-                        mass_to_patch = att_mean[b][:, idx_cols].mean()
-                        batch_loss += (-mass_to_patch)
-                        valid += 1
-            
-                    if valid > 0:
-                        hijack_sum += (batch_loss / valid)
-                        used += 1
-            
-                if used == 0:
-                    return torch.zeros((), device=device)
-                return hijack_sum / used
+                    mass_to_patch = att_mean[b][:, cols].mean()
+                    batch_loss += (-mass_to_patch)  # negative → maximize attention to patch
+                    valid += 1
+        
+                if valid > 0:
+                    hijack_sum += (batch_loss / valid)
+                    used += 1
+        
+            if used == 0:
+                return torch.zeros((), device=device)
+            return hijack_sum / used
+
 
     def boundary_disruption_loss(self, clean_logits, adv_logits) -> torch.Tensor:
         # Argmax → edges via Sobel → maximize L1 difference (return negative to maximize)
@@ -303,10 +310,69 @@ class PatchTrainer:
                 logits = F.interpolate(logits, size=out_size, mode="bilinear", align_corners=False)
             return logits, out.attentions
 
+    def _pick_highres_4d(self, tensors):
+        """Pick the 4D tensor with the largest H*W (highest resolution)."""
+        best = None; best_area = -1
+        for t in tensors:
+            if torch.is_tensor(t) and t.ndim == 4:
+                h, w = t.shape[-2], t.shape[-1]
+                area = int(h) * int(w)
+                if area > best_area:
+                    best = t; best_area = area
+        return best
+    
+    def _extract_logits(self, out):
+        """
+        Normalize various model outputs to a single (B,C,H,W) tensor.
+        Supports: Tensor, list/tuple of tensors, dict with tensor values, or objects with .logits.
+        Returns None if nothing usable is found.
+        """
+        # direct tensor
+        if torch.is_tensor(out):
+            return out
+    
+        # HF-style: object with .logits
+        if hasattr(out, "logits") and torch.is_tensor(out.logits):
+            return out.logits
+    
+        # dict: try common keys, else any tensor value
+        if isinstance(out, dict):
+            for k in ("logits", "out", "main_out", "pred", "aux", "output"):
+                v = out.get(k, None)
+                if torch.is_tensor(v):
+                    return v
+            # fallback: any 4D tensor value
+            return self._pick_highres_4d([v for v in out.values() if torch.is_tensor(v)])
+    
+        # list/tuple: multi-scale outputs -> pick highest-res 4D
+        if isinstance(out, (list, tuple)):
+            return self._pick_highres_4d(list(out))
+    
+        # unknown container
+        return None
+    
     def surrogate_forward_logits(self, img_4bhwc, target_size):
+        """
+        Forward surrogate and return a (B,C,H,W) tensor resized to target_size.
+        Handles multi-scale outputs and dict/list returns.
+        """
         if self.surrogate is None:
             return None
-        logits = self.surrogate(img_4bhwc)  # expect (B,C,h,w)
+    
+        out = self.surrogate(img_4bhwc)
+    
+        logits = self._extract_logits(out)
+        if logits is None:
+            # optional: uncomment to debug different PIDNet heads
+            # self.log.info(f"[Surrogate] Could not extract logits from type {type(out)}")
+            return None
+    
+        # Some models may return (B,H,W) with implicit C=1; expand
+        if logits.ndim == 3:
+            logits = logits.unsqueeze(1)
+        elif logits.ndim != 4:
+            return None
+    
         if logits.shape[-2:] != target_size:
             logits = F.interpolate(logits, size=target_size, mode="bilinear", align_corners=False)
         return logits
@@ -367,7 +433,15 @@ class PatchTrainer:
                 # Regularizers
                 with torch.no_grad():
                     patch_mask = self._estimate_patch_mask(image, patched_image)
+                    
                 ah_loss = self.attn_hijack_loss(atts_adv, patch_mask, H, W)               # attention hijack
+                
+                if ah_loss.numel() == 0 or (ah_loss.detach().abs() < 1e-12):
+                    # fallback: saliency hijack (model-agnostic)
+                    # NOTE: saliency_hijack needs gradients through `patched_image`
+                    patched_image.requires_grad_(True)
+                    ah_loss = self.saliency_hijack_loss(logits_adv, patched_image, patch_mask)
+
                 tv = self.tv_loss(base_patch)                                            # TV
                 b_loss = self.boundary_disruption_loss(logits_clean, logits_adv)         # boundary/region
                 f_loss = self.freq_shaping_loss(base_patch)                              # frequency ring
@@ -431,7 +505,14 @@ class PatchTrainer:
 
                         with torch.no_grad():
                             patch_mask = self._estimate_patch_mask(image, patched_image)
+                        
                         ah_loss = self.attn_hijack_loss(atts_adv, patch_mask, H, W)
+
+                        if ah_loss.numel() == 0 or (ah_loss.detach().abs() < 1e-12):
+                            # fallback: saliency hijack (model-agnostic)
+                            # NOTE: saliency_hijack needs gradients through `patched_image`
+                            patched_image.requires_grad_(True)
+                            ah_loss = self.saliency_hijack_loss(logits_adv, patched_image, patch_mask)
                         tv = self.tv_loss(base_patch)
                         b_loss = self.boundary_disruption_loss(logits_clean, logits_adv)
                         f_loss = self.freq_shaping_loss(base_patch)
