@@ -247,9 +247,12 @@ class PatchTrainer:
         return - band_energy
 
     # ---------------- Forwards ----------------
-    def segformer_forward(self, img_4bhwc):
-        out = self.model(img_4bhwc, output_attentions=True)
-        return out.logits, out.attentions  # (B,C,H,W), tuple
+    def segformer_forward(self, img_4bhwc, out_size=None):
+            out = self.model(img_4bhwc, output_attentions=True)
+            logits = out.logits  # (B,C,h,w)
+            if out_size is not None and logits.shape[-2:] != out_size:
+                logits = F.interpolate(logits, size=out_size, mode="bilinear", align_corners=False)
+            return logits, out.attentions
 
     def surrogate_forward_logits(self, img_4bhwc, target_size):
         if self.surrogate is None:
@@ -294,9 +297,13 @@ class PatchTrainer:
                 patched_label = patched_label.long()
 
                 # ViT forward
-                logits_adv, atts_adv = self.segformer_forward(patched_image)
+                target_hw = patched_label.shape[-2:]  # (H,W) of labels
+
+                # ViT forward (resized to label size)
+                logits_adv, atts_adv = self.segformer_forward(patched_image, out_size=target_hw)
                 with torch.no_grad():
-                    logits_clean, _ = self.segformer_forward(image)
+                    logits_clean, _    = self.segformer_forward(image,        out_size=target_hw)
+
 
                 # Attack loss (your two-stage)
                 if use_stage1:
@@ -359,9 +366,12 @@ class PatchTrainer:
                         patched_image, patched_label = self.apply_patch(image, true_label, patch)
                         patched_label = patched_label.long()
 
-                        logits_adv, atts_adv = self.segformer_forward(patched_image)
+                        target_hw = patched_label.shape[-2:]
+
+                        logits_adv, atts_adv = self.segformer_forward(patched_image, out_size=target_hw)
                         with torch.no_grad():
-                            logits_clean, _ = self.segformer_forward(image)
+                            logits_clean, _    = self.segformer_forward(image,        out_size=target_hw)
+
 
                         if use_stage1:
                             attack_loss = self.criterion.compute_loss_transegpgd_stage1(
