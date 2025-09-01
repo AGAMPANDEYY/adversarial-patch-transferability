@@ -6,7 +6,9 @@ experiment:
 
 ### 1.Model
 model:
-  name: 'pidnet_s'
+  ### name: 'pidnet_s'
+  name: "segformer"
+  hf_name: "nvidia/segformer-b2-finetuned-cityscapes-1024-1024"
   segformer_name: 'segformer_b0'
   # If you have a local HF folder (config.json + pytorch_model.bin):
   segformer_ckpt_dir: /kaggle/input/my_local_hf_segformer_dir
@@ -34,12 +36,16 @@ patch:
 ### 3.Optimizer
 optimizer:
   optimizer: "sgd"
-  init_lr: 0.005
+  ### init_lr: 0.005
   momentum: 0.9
   weight_decay: 0.0005
   nesterov: False
   exponentiallr: True
   exponentiallr_gamma: 0.995
+  init_lr: 2.0e-2
+  use_pgd: true          # set true for PGD
+  pgd_steps: 7
+  pgd_alpha: 0.007843     # 2/255
 
 ## 4. Loss
 loss:
@@ -48,6 +54,13 @@ loss:
   ohemkeep: 131072
   balance_weights: [0.4, 1.0]
   sb_weights: 1.0
+
+  ### For Vit To CNN transfer Training
+  tv_weight: 1.0e-4
+  attn_hijack_w: 1.0e-1
+  boundary_w: 2.0e-1
+  freq_w: 5.0e-2
+  grad_align_w: 1.0e-1    # needs surrogate to be enabled
 
 
 ### 5.Training 
@@ -112,3 +125,11 @@ attack:
   use_segpgd: true        # turn SegPGD mode on/off
   segpgd_steps: 3         # T: inner attack steps per batch (start with 2–3)
   segpgd_alpha: 0.005     # α: per-step step size for the patch update (use your epsilon if you like)
+
+freq:
+  r_low: 0.12
+  r_high: 0.45
+
+surrogate:
+  enable: true
+  name: "pidnet_s"
