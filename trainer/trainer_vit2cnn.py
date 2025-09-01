@@ -189,33 +189,82 @@ class PatchTrainer:
         return (diff > thresh).float()
 
     def attn_hijack_loss(self, attentions: Tuple[torch.Tensor, ...],
-                         patch_mask: torch.Tensor, H: int, W: int) -> torch.Tensor:
-        if attentions is None or len(attentions)==0:
-            return torch.zeros((), device=self.device)
-        strides = [4,8,16,32]
-        B = patch_mask.size(0)
-        hijack, cnt = 0.0, 0
-        for att in attentions:
-            if att is None: continue
-            B_a, Hh, Nq, Nk = att.shape
-            assert B_a==B and Nq==Nk
-            stride = None
-            for s in strides:
-                if (H//s)*(W//s)==Nq: stride=s; break
-            if stride is None: continue
-            h_s, w_s = H//stride, W//stride
-            pmask = F.interpolate(patch_mask, size=(h_s,w_s), mode="nearest").view(B,-1)  # (B,N)
-            att_mean = att.mean(dim=1)  # (B,N,N)
-            batch_loss, valid = 0.0, 0
-            for b in range(B):
-                idx = pmask[b] > 0.5
-                if idx.sum()==0: continue
-                mass_to_patch = att_mean[b][:, idx].mean()
-                batch_loss += (-mass_to_patch)
-                valid += 1
-            if valid>0:
-                hijack += (batch_loss/valid); cnt += 1
-        return hijack/cnt if cnt>0 else torch.zeros((), device=self.device)
+                     patch_mask: torch.Tensor, H: int, W: int) -> torch.Tensor:
+                """
+                Robust version: skips incompatible attention blocks; maps to token grids
+                using stride heuristics and falls back to sqrt(N) if needed.
+                """
+                device = self.device
+                if (attentions is None) or (len(attentions) == 0):
+                    return torch.zeros((), device=device)
+            
+                B = patch_mask.size(0)
+                strides = [4, 8, 16, 32]  # common MiT stages
+                hijack_sum, used = 0.0, 0
+            
+                for idx, att in enumerate(attentions):
+                    # Some entries can be None or not 4D (skip safely)
+                    if att is None or not torch.is_tensor(att) or att.ndim != 4:
+                        continue
+            
+                    B_a, n_heads, Nq, Nk = att.shape
+            
+                    # Must be batch-aligned and square (self-attention)
+                    if (B_a != B) or (Nq != Nk) or (Nq <= 0):
+                        # Skip silently; HF can return variant blocks depending on config
+                        continue
+            
+                    # Try to map Nq to an (h_s, w_s) grid via known strides first
+                    stride = None
+                    for s in strides:
+                        if (H // s) * (W // s) == Nq:
+                            stride = s
+                            h_s, w_s = H // s, W // s
+                            break
+            
+                    if stride is None:
+                        # Fallback: approximate grid from aspect ratio and Nq
+                        # Aim for h_s ~ H/W * sqrt(Nq), w_s ~ sqrt(Nq)
+                        root = int(round(Nq ** 0.5))
+                        if root * root == Nq:
+                            h_s, w_s = root, root
+                        else:
+                            # keep aspect ratio roughly consistent
+                            ratio = H / max(1.0, float(W))
+                            w_s = max(1, int(round(root)))
+                            h_s = max(1, int(round(ratio * w_s)))
+                            # final correction if product off: adjust w_s
+                            if h_s * w_s != Nq:
+                                if h_s > 0:
+                                    w_s = max(1, Nq // h_s)
+                            # still mismatched? skip
+                            if h_s * w_s != Nq:
+                                continue
+            
+                    # Downsample patch mask to token grid
+                    pmask = F.interpolate(patch_mask, size=(h_s, w_s), mode="nearest").view(B, -1)  # (B, N)
+            
+                    # Average over heads
+                    att_mean = att.mean(dim=1)  # (B, N, N)
+            
+                    # Accumulate negative mean attention to patch tokens (maximize mass to patch)
+                    batch_loss, valid = 0.0, 0
+                    for b in range(B):
+                        idx_cols = pmask[b] > 0.5
+                        if idx_cols.sum() == 0:
+                            continue
+                        # attention of all queries TO patch columns
+                        mass_to_patch = att_mean[b][:, idx_cols].mean()
+                        batch_loss += (-mass_to_patch)
+                        valid += 1
+            
+                    if valid > 0:
+                        hijack_sum += (batch_loss / valid)
+                        used += 1
+            
+                if used == 0:
+                    return torch.zeros((), device=device)
+                return hijack_sum / used
 
     def boundary_disruption_loss(self, clean_logits, adv_logits) -> torch.Tensor:
         # Argmax → edges via Sobel → maximize L1 difference (return negative to maximize)
