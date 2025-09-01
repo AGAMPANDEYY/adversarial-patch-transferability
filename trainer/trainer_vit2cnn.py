@@ -214,6 +214,35 @@ class PatchTrainer:
             # Negative of contrast → minimizing total increases (inside - outside)
             return -(inside - outside)
 
+    ##-------------------------- ViT CNN alignment ------------------- #
+    def logit_agreement_loss(self, vit_logits, cnn_logits):
+        """
+        First-order surrogate shaping: maximize cosine similarity between ViT and CNN logits.
+        Shapes: (B, C, H, W) for both; both already resized to target_hw.
+        """
+        v = vit_logits.flatten(1)
+        c = cnn_logits.flatten(1)
+        v = F.normalize(v, dim=1)
+        c = F.normalize(c, dim=1)
+        # negative cosine => minimizing pushes them to be similar
+        return - (v * c).sum(dim=1).mean()
+    
+    def kl_align(self, p_logits, q_logits, T=1.0):
+        """
+        Alternative first-order option: KL(p || q).
+        """
+        p = F.log_softmax(p_logits / T, dim=1)
+        q = F.softmax(q_logits / T, dim=1)
+        return F.kl_div(p, q, reduction='batchmean') * (T * T)
+    
+    def patch_entropy_loss(self, logits, patch_mask):
+        """
+        Optional attention-free hijack: maximize entropy only under the patch (first-order).
+        """
+        probs = torch.softmax(logits, dim=1)
+        ent = -(probs * probs.clamp_min(1e-8).log()).sum(dim=1, keepdim=True)  # (B,1,H,W)
+        return - (ent * patch_mask).mean()  # negative => maximize entropy under patch
+
 
     def attn_hijack_loss(self, attentions, patch_mask, H: int, W: int) -> torch.Tensor:
             """
@@ -417,7 +446,7 @@ class PatchTrainer:
                 # ViT forward (resized to label size)
                 logits_adv, atts_adv = self.segformer_forward(patched_image, out_size=target_hw)
                 with torch.no_grad():
-                    logits_clean, _    = self.segformer_forward(image,        out_size=target_hw)
+                    logits_clean, _ = self.segformer_forward(image,out_size=target_hw)
 
 
                 # Attack loss (your two-stage)
@@ -446,24 +475,17 @@ class PatchTrainer:
                 b_loss = self.boundary_disruption_loss(logits_clean, logits_adv)         # boundary/region
                 f_loss = self.freq_shaping_loss(base_patch)                              # frequency ring
 
-                # Optional: Surrogate-CNN gradient alignment (needs 2nd-order grads)
+                # Optional: Surrogate-CNN gradient alignment (1st-order grads)
+    
                 ga_loss = torch.zeros((), device=self.device)
                 if self.use_surrogate and self.grad_align_w > 0.0:
-                    # viT grad wrt patch_param
-                    g_vit = torch.autograd.grad(attack_loss, self.patch_param,
-                                               create_graph=True, retain_graph=True, allow_unused=True)[0]
-                    # surrogate CE on patched image
-                    sur_logits = self.surrogate_forward_logits(patched_image, target_size=(H,W))
+                    sur_logits = self.surrogate_forward_logits(patched_image, target_size=target_hw)
                     if sur_logits is not None:
-                        sur_ce = F.cross_entropy(sur_logits, patched_label,
-                                                 ignore_index=self.ignore_index, reduction="mean")
-                        g_cnn = torch.autograd.grad(sur_ce, self.patch_param,
-                                                    create_graph=True, retain_graph=True, allow_unused=True)[0]
-                        if (g_vit is not None) and (g_cnn is not None):
-                            gv = g_vit.view(-1)
-                            gc = g_cnn.view(-1)
-                            # -cosine → maximize alignment
-                            ga_loss = - F.cosine_similarity(gv.unsqueeze(0), gc.unsqueeze(0)).mean()
+                        # Option 1 (recommended): cosine agreement of raw logits
+                        ga_loss = self.logit_agreement_loss(logits_adv, sur_logits)
+                
+                        # Option 2: KL alignment (comment out option 1 to use this)
+                        # ga_loss = self.kl_align(logits_adv, sur_logits, T=1.0)
 
                 # Total (minimize)
                 total = (-attack_loss) \
