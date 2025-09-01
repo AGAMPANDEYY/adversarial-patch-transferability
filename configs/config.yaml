@@ -8,7 +8,7 @@ experiment:
 model:
   ### name: 'pidnet_s'
   name: "segformer"
-  hf_name: "nvidia/segformer-b2-finetuned-cityscapes-1024-1024"
+  hf_name: "nvidia/segformer-b0-finetuned-cityscapes-1024-1024"
   segformer_name: 'segformer_b0'
   # If you have a local HF folder (config.json + pytorch_model.bin):
   segformer_ckpt_dir: /kaggle/input/my_local_hf_segformer_dir
