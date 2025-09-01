@@ -540,18 +540,16 @@ class PatchTrainer:
                         f_loss = self.freq_shaping_loss(base_patch)
 
                         ga_loss = torch.zeros((), device=self.device)
+                     
                         if self.use_surrogate and self.grad_align_w > 0.0:
-                            g_vit = torch.autograd.grad(attack_loss, self.patch_param,
-                                                       create_graph=True, retain_graph=True, allow_unused=True)[0]
-                            sur_logits = self.surrogate_forward_logits(patched_image, target_size=(H,W))
+                            sur_logits = self.surrogate_forward_logits(patched_image, target_size=target_hw)
                             if sur_logits is not None:
-                                sur_ce = F.cross_entropy(sur_logits, patched_label,
-                                                         ignore_index=self.ignore_index, reduction="mean")
-                                g_cnn = torch.autograd.grad(sur_ce, self.patch_param,
-                                                            create_graph=True, retain_graph=True, allow_unused=True)[0]
-                                if (g_vit is not None) and (g_cnn is not None):
-                                    gv = g_vit.view(-1); gc = g_cnn.view(-1)
-                                    ga_loss = - F.cosine_similarity(gv.unsqueeze(0), gc.unsqueeze(0)).mean()
+                                # Option 1 (recommended): cosine agreement of raw logits
+                                ga_loss = self.logit_agreement_loss(logits_adv, sur_logits)
+                        
+                                # Option 2: KL alignment (comment out option 1 to use this)
+                                # ga_loss = self.kl_align(logits_adv, sur_logits, T=1.0)
+
 
                         total_inner = (-attack_loss) \
                                       + self.tv_weight * tv \
