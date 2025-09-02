@@ -449,8 +449,15 @@ class PatchTrainer:
                 patched_image, patched_label = self.apply_patch(image, true_label, patch)
                 patched_label = patched_label.long()
 
-                # ViT forward
+               # --- Downscale INTO SegFormer, keep losses/metrics at label size ---
                 target_hw = patched_label.shape[-2:]  # (H,W) of labels
+                vit_ds = float(getattr(self.cfg.train, "vit_downscale", 0.75))  # 0.75 is a good default
+                if vit_ds < 1.0:
+                    ds_hw = (int(image.shape[-2] * vit_ds), int(image.shape[-1] * vit_ds))
+                    image_ds         = F.interpolate(image,         size=ds_hw, mode="bilinear", align_corners=False)
+                    patched_image_ds = F.interpolate(patched_image, size=ds_hw, mode="bilinear", align_corners=False)
+                else:
+                    image_ds, patched_image_ds = image, patched_image
 
                 # ViT forward (resized to label size and Mixed precision)
                 with autocast(dtype=torch.float16):
@@ -523,6 +530,15 @@ class PatchTrainer:
                         patched_label = patched_label.long()
 
                         target_hw = patched_label.shape[-2:]
+
+                        # --- Downscale INTO SegFormer here too ---
+                        vit_ds = float(getattr(self.cfg.train, "vit_downscale", 0.75))
+                        if vit_ds < 1.0:
+                            ds_hw = (int(image.shape[-2] * vit_ds), int(image.shape[-1] * vit_ds))
+                            image_ds         = F.interpolate(image,         size=ds_hw, mode="bilinear", align_corners=False)
+                            patched_image_ds = F.interpolate(patched_image, size=ds_hw, mode="bilinear", align_corners=False)
+                        else:
+                            image_ds, patched_image_ds = image, patched_image
 
                         logits_adv, atts_adv = self.segformer_forward(patched_image, out_size=target_hw)
                         with torch.no_grad():
