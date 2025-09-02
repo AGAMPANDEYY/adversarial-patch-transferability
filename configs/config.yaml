@@ -81,6 +81,10 @@ train:
   log_per_iters: 1
   start_epoch: 0
   end_epoch: 30
+  max_batches_per_epoch: 300      # was ~2975
+  max_epochs: 10                  # was 30 (you can still resume later)
+  surrogate_every: 4              # run surrogate every 4th step only
+  vit_downscale: 0.75             # feed a 0.75× resized image to SegFormer
   # finetune: False
   # finetune_add: '/content/drive/MyDrive/Colab Notebooks/1_Papers/2_RobustRealtimeSS/1_Pretraining_cityscape/1_PIDNet/experiments/pidnet_s_crop1024x1024_ExponentialLR0995_batch10_basesize2048_randscale0_5to2/checkpoints/2025-01-02 08:36:14 EST-0500_141_0.648.pth.tar'
 
