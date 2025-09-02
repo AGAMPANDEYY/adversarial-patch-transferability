@@ -19,6 +19,7 @@ from pretrained_models.PIDNet.model import get_pred_model  # assumes available i
 
 # Hugging Face SegFormer (ViT-backbone)
 from transformers import AutoConfig, SegformerForSemanticSegmentation
+from torch.cuda.amp import autocast
 
 # Restore original sys.path
 sys.path = original_sys_path
@@ -86,7 +87,7 @@ class PatchTrainer:
 
         # ---------------- SegFormer (ViT target) ----------------
         hf_name = getattr(config.model, "hf_name",
-                          "nvidia/segformer-b2-finetuned-cityscapes-1024-1024")
+                          "nvidia/segformer-b0-finetuned-cityscapes-1024-1024")
         hf_cfg = AutoConfig.from_pretrained(
             hf_name, num_labels=config.dataset.num_classes,
             output_attentions=True, output_hidden_states=False
@@ -419,6 +420,12 @@ class PatchTrainer:
             f"Iterations/epoch: {self.iters_per_epoch}"
         )
 
+        max_batches = int(getattr(self.cfg.train, "max_batches_per_epoch", 300))  # 300 << 2975
+        max_epochs  = int(getattr(self.cfg.train, "max_epochs", 10))              # 10 << 30
+        self.end_epoch = min(self.end_epoch, self.start_epoch + max_epochs)
+        self.log.info(f"[Limiter] max_batches_per_epoch={max_batches}, max_epochs={max_epochs}")
+        surrogate_every = int(getattr(self.cfg.train, "surrogate_every", 4))  # every 4th step
+
         IoU_over_epochs = []
         H, W = self.cfg.train.height, self.cfg.train.width
 
@@ -430,6 +437,8 @@ class PatchTrainer:
 
             cum_attack_loss = 0.0
             for it, batch in enumerate(self.train_dl, 0):
+                if max_batches and it >= max_batches:
+                        break
                 image, true_label, _, _, _ = batch
                 image = image.to(self.device)
                 true_label = true_label.to(self.device).long()
@@ -443,10 +452,11 @@ class PatchTrainer:
                 # ViT forward
                 target_hw = patched_label.shape[-2:]  # (H,W) of labels
 
-                # ViT forward (resized to label size)
-                logits_adv, atts_adv = self.segformer_forward(patched_image, out_size=target_hw)
-                with torch.no_grad():
-                    logits_clean, _ = self.segformer_forward(image,out_size=target_hw)
+                # ViT forward (resized to label size and Mixed precision)
+                with autocast(dtype=torch.float16):
+                    logits_adv, atts_adv = self.segformer_forward(patched_image_ds, out_size=target_hw)
+                with torch.no_grad(), autocast(dtype=torch.float16):
+                    logits_clean, _ = self.segformer_forward(image_ds, out_size=target_hw)
 
 
                 # Attack loss (your two-stage)
@@ -478,12 +488,13 @@ class PatchTrainer:
                 # Optional: Surrogate-CNN gradient alignment (1st-order grads)
     
                 ga_loss = torch.zeros((), device=self.device)
-                if self.use_surrogate and self.grad_align_w > 0.0:
+                use_sur_now = (self.use_surrogate and self.grad_align_w > 0.0 and
+                               (surrogate_every <= 1 or (it % surrogate_every == 0)))
+                if use_sur_now:
                     sur_logits = self.surrogate_forward_logits(patched_image, target_size=target_hw)
                     if sur_logits is not None:
-                        # Option 1 (recommended): cosine agreement of raw logits
-                        ga_loss = self.logit_agreement_loss(logits_adv, sur_logits)
-                
+                        ga_loss = self.logit_agreement_loss(logits_adv.detach(), sur_logits)
+                        
                         # Option 2: KL alignment (comment out option 1 to use this)
                         # ga_loss = self.kl_align(logits_adv, sur_logits, T=1.0)
 
@@ -540,12 +551,13 @@ class PatchTrainer:
                         f_loss = self.freq_shaping_loss(base_patch)
 
                         ga_loss = torch.zeros((), device=self.device)
-                     
-                        if self.use_surrogate and self.grad_align_w > 0.0:
+                        use_sur_now = (self.use_surrogate and self.grad_align_w > 0.0 and
+                                       (surrogate_every <= 1 or (it % surrogate_every == 0)))
+                        if use_sur_now:
                             sur_logits = self.surrogate_forward_logits(patched_image, target_size=target_hw)
                             if sur_logits is not None:
-                                # Option 1 (recommended): cosine agreement of raw logits
-                                ga_loss = self.logit_agreement_loss(logits_adv, sur_logits)
+                                ga_loss = self.logit_agreement_loss(logits_adv.detach(), sur_logits)
+
                         
                                 # Option 2: KL alignment (comment out option 1 to use this)
                                 # ga_loss = self.kl_align(logits_adv, sur_logits, T=1.0)
