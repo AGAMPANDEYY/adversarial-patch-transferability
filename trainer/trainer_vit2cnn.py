@@ -409,9 +409,14 @@ class PatchTrainer:
 
     # ---------------- Train ----------------
     def train(self):
-        start_epoch, end_epoch, total_epochs = self.start_epoch, self.end_epoch, self.total_epochs
-        assert total_epochs == 30, f"This schedule expects 30 epochs; got {total_epochs}."
-        switch_epoch = start_epoch + (total_epochs // 2)
+        #start_epoch, end_epoch, total_epochs = self.start_epoch, self.end_epoch, self.total_epochs
+        #assert total_epochs == 30, f"This schedule expects 30 epochs; got {total_epochs}."
+        #switch_epoch = start_epoch + (total_epochs // 2)
+        desired_total = int(getattr(self.cfg.train, "total_epochs", 20))  # 20
+        self.end_epoch = self.start_epoch + desired_total
+        start_epoch, end_epoch = self.start_epoch, self.end_epoch
+        total_epochs = end_epoch - start_epoch
+        switch_epoch = start_epoch + (total_epochs // 2)  # 10/10 split if total=20
 
         start_time = time.time()
         self.log.info(
