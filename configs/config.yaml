@@ -15,7 +15,7 @@ model:
   # OR if you saved an HF-style state_dict to a .pth:
   segformer_ckpt: /kaggle/input/segformer_b0_hf_style/my_state_dict.pth
 
-### 2. Data
+### 2. Dataa
 dataset:
   name: "cityscapes"
   root: "/kaggle/input/cityscapes-for-segmentation/Cityscapes/"
@@ -80,7 +80,7 @@ train:
   power: 2.5
   log_per_iters: 1
   start_epoch: 0
-  end_epoch: 30
+  end_epoch: 20
   max_batches_per_epoch: 300      # was ~2975
   max_epochs: 10                  # was 30 (you can still resume later)
   surrogate_every: 4              # run surrogate every 4th step only
