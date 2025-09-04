@@ -158,8 +158,8 @@ class PatchTrainer:
 
 
     def _softmax_entropy(self, logits, dim=1, eps=1e-8):
-    p = torch.softmax(logits, dim=dim).clamp_min(eps)
-    return -(p * p.log()).sum(dim=dim)  # (B,H,W)
+        p = torch.softmax(logits, dim=dim).clamp_min(eps)
+        return -(p * p.log()).sum(dim=dim)  # (B,H,W)
     
     def _dilate_mask(self, mask_2d, k=5):
         if k <= 1:
