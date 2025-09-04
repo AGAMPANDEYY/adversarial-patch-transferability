@@ -146,6 +146,55 @@ class PatchTrainer:
         self.apply_patch = Patch(config).apply_patch
         self.ignore_index = config.train.ignore_label
         self.num_classes  = config.dataset.num_classes
+        
+        # --- Sidewalk placement options (Cityscapes: sidewalk=1) ---
+        self.sidewalk_id           = getattr(config.dataset, "sidewalk_id", 1)
+        self.place_on_sidewalk     = getattr(getattr(config, "patch", object()), "place_on_sidewalk", True)
+        self.sidewalk_entropy_bias = getattr(getattr(config, "patch", object()), "sidewalk_entropy_bias", True)
+        self.sidewalk_topk_frac    = float(getattr(getattr(config, "patch", object()), "sidewalk_topk_frac", 0.20))  # top 20%
+        self.sidewalk_dilate       = int(getattr(getattr(config, "patch", object()), "sidewalk_dilate", 5))          # pixels
+        self.mask_patch_labels     = bool(getattr(getattr(config, "patch", object()), "mask_patch_labels", False))   # set ignore_index under patch
+
+
+
+    def _softmax_entropy(self, logits, dim=1, eps=1e-8):
+    p = torch.softmax(logits, dim=dim).clamp_min(eps)
+    return -(p * p.log()).sum(dim=dim)  # (B,H,W)
+    
+    def _dilate_mask(self, mask_2d, k=5):
+        if k <= 1:
+            return mask_2d
+        m = mask_2d.float().unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+        m = F.max_pool2d(m, kernel_size=k, stride=1, padding=k//2)
+        return (m[0,0] > 0.5)
+    
+    def _choose_patch_topleft_from_mask(self, mask_2d, S, entropy_2d=None, topk_frac=0.2):
+        H, W = mask_2d.shape
+        valid = mask_2d.clone()
+        if S > 1:
+            valid[:S//2, :] = False
+            valid[H-(S-S//2):, :] = False
+            valid[:, :S//2] = False
+            valid[:, W-(S-S//2):] = False
+        idx = valid.nonzero(as_tuple=False)  # (K,2): [y,x]
+        if idx.numel() == 0:
+            return None
+        if entropy_2d is not None:
+            ent = entropy_2d[idx[:,0], idx[:,1]]
+            k = max(1, int(topk_frac * idx.size(0)))
+            _, topk_inds = torch.topk(ent, k, largest=True)
+            idx = idx[topk_inds]
+        yx = idx[torch.randint(0, idx.size(0), (1,), device=idx.device).item()]
+        yc, xc = int(yx[0]), int(yx[1])
+        y0 = max(0, min(yc - S//2, H - S))
+        x0 = max(0, min(xc - S//2, W - S))
+        return y0, x0
+    
+    def _paste_patch(self, img_bchw, patch_3chw, y0, x0):
+        out = img_bchw.clone()
+        S = patch_3chw.shape[-1]
+        out[:, :, y0:y0+S, x0:x0+S] = patch_3chw[None]
+        return out
 
     # ---------------- Patch parametrization ----------------
     def get_patch(self):
@@ -448,11 +497,65 @@ class PatchTrainer:
                 image = image.to(self.device)
                 true_label = true_label.to(self.device).long()
 
+                #base_patch = self.get_patch()
+                #patch = self.eot_patch(base_patch)
+
+                #patched_image, patched_label = self.apply_patch(image, true_label, patch)
+                #patched_label = patched_label.long()
+                #SIDEWALK P[ATCH PLACEMENT 
+
                 base_patch = self.get_patch()
                 patch = self.eot_patch(base_patch)
+                S = patch.shape[-1]
+                target_hw = true_label.shape[-2:]
+                
+                # --- get clean logits ON THE CLEAN IMAGE (you already have downscale logic below; reuse it) ---
+                vit_ds = float(getattr(self.cfg.train, "vit_downscale", 0.75))
+                if vit_ds < 1.0:
+                    ds_hw = (int(image.shape[-2] * vit_ds), int(image.shape[-1] * vit_ds))
+                    image_ds = F.interpolate(image, size=ds_hw, mode="bilinear", align_corners=False)
+                else:
+                    image_ds = image
+                
+                with torch.no_grad(), autocast(dtype=torch.float16):
+                    clean_logits, _ = self.segformer_forward(image_ds, out_size=target_hw)  # (B,C,H,W)
+                
+                # --- build sidewalk mask from clean prediction ---
+                clean_pred = clean_logits.argmax(dim=1)                # (B,H,W)
+                sidewalk_mask = (clean_pred == self.sidewalk_id)       # (B,H,W)
+                
+                # optional entropy bias on sidewalk pixels
+                ent = self._softmax_entropy(clean_logits) if self.sidewalk_entropy_bias else None  # (B,H,W)
+                
+                # optional dilation (per image)
+                if self.sidewalk_dilate > 1:
+                    sidewalk_mask = torch.stack([self._dilate_mask(m, self.sidewalk_dilate) for m in sidewalk_mask], dim=0)
+                
+                # --- choose per-image location & paste the same patch ---
+                patched_imgs = []
+                patched_label = true_label.clone().long()
+                for b in range(image.size(0)):
+                    yx = self._choose_patch_topleft_from_mask(
+                        sidewalk_mask[b], S,
+                        entropy_2d=(ent[b] if ent is not None else None),
+                        topk_frac=self.sidewalk_topk_frac
+                    )
+                    if yx is None:  # fallback random
+                        Htot, Wtot = target_hw
+                        y0 = random.randint(0, max(0, Htot - S))
+                        x0 = random.randint(0, max(0, Wtot - S))
+                    else:
+                        y0, x0 = yx
+                
+                    # paste the EOT patch
+                    patched_imgs.append(self._paste_patch(image[b:b+1], patch, y0, x0))
+                
+                    # (optional) mask labels under the patch to ignore supervision there
+                    if self.mask_patch_labels:
+                        patched_label[b, y0:y0+S, x0:x0+S] = self.ignore_index
+                
+                patched_image = torch.cat(patched_imgs, dim=0)
 
-                patched_image, patched_label = self.apply_patch(image, true_label, patch)
-                patched_label = patched_label.long()
 
                # --- Downscale INTO SegFormer, keep losses/metrics at label size ---
                 target_hw = patched_label.shape[-2:]  # (H,W) of labels
