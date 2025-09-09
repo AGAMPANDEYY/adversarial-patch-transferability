@@ -47,7 +47,7 @@ class PatchTrainer():
       self.epsilon = config.optimizer.init_lr
 
       """ SIDEWALK CONFIGS"""
-      self.sidewalk_id = getattr(config.dataset, "sidewalk_id", 1)  # Cityscapes trainId for sidewalk
+      self.sidewalk_id = getattr(config.dataset, "sidewalk_id", 5)  # Cityscapes trainId for sidewalk
       self.place_on_sidewalk = getattr(config.patch, "place_on_sidewalk", True)
       self.sidewalk_entropy_bias = getattr(config.patch, "sidewalk_entropy_bias", True)  # use entropy
       self.sidewalk_topk_frac = getattr(config.patch, "sidewalk_topk_frac", 0.20)        # top 20% sidewalk px
