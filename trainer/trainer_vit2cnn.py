@@ -148,7 +148,7 @@ class PatchTrainer:
         self.num_classes  = config.dataset.num_classes
         
         # --- Sidewalk placement options (Cityscapes: sidewalk=1) ---
-        self.sidewalk_id           = getattr(config.dataset, "sidewalk_id", 1)
+        self.sidewalk_id           = getattr(config.dataset, "sidewalk_id", 5)
         self.place_on_sidewalk     = getattr(getattr(config, "patch", object()), "place_on_sidewalk", True)
         self.sidewalk_entropy_bias = getattr(getattr(config, "patch", object()), "sidewalk_entropy_bias", True)
         self.sidewalk_topk_frac    = float(getattr(getattr(config, "patch", object()), "sidewalk_topk_frac", 0.20))  # top 20%
